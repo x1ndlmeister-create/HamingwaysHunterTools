@@ -44,6 +44,12 @@ A comprehensive, feature-rich Hunter addon for World of Warcraft Classic (1.12) 
 - Skipped and delayed cast counters
 - Helps optimize your weaving technique
 
+### Ammunition Tracking
+- **Ammo counter** displays remaining arrows/bullets
+- **Low ammo warning** when supply runs low
+- **Automatic detection** of equipped ammo type
+- Clean, minimal display integrated into main frame
+
 ## 📥 Installation
 
 ### Method 1: Manual Installation (Recommended)
