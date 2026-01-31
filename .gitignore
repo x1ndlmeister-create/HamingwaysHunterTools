@@ -1,0 +1,50 @@
+# WoW AddOn Files
+*.toc.bak
+*.lua.bak
+*.lua.backup*
+*.xml.bak
+
+# Backup directories
+*_backup/
+*_backup_*/
+*_müll/
+*_extracted/
+* - Kopie/
+
+# Test files
+performance_test.lua
+trace_depth.ps1
+depth_check_refined.ps1
+
+# Development notes
+DEBUG_COMMANDS.md
+IMPLEMENTATION_REMAINING.md
+REFACTORING_COMPLETE.md
+CRITICAL_RULES.md
+LUA_5.0_COMPATIBILITY.md
+NOTES_*.md
+*_SECTION.txt
+*_FLOWCHART*.md
+*_FLOWCHART*.lua
+ROTATION_FLOWCHART.md
+
+# Editor files
+*.xcf
+*.psd
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Git files
+.git/
+.gitignore
+.gitattributes

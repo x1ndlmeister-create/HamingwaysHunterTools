@@ -1,0 +1,11 @@
+## Interface: 11200
+## Title: Hamingway's HunterTools
+## Notes: Complete hunter toolkit with auto shot timer, reaction stats, ammo tracking and pet feeder (Vanilla 1.12)
+## Author: Hamingway
+## Version: 0.8.3
+
+## SavedVariablesPerCharacter: HamingwaysHunterToolsDB
+
+HamingwaysHunterTools.lua
+HamingwaysHunterTools_Warnings.lua
+HamingwaysHunterTools_Tranq.lua
