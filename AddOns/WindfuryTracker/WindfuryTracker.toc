@@ -1,0 +1,7 @@
+## Interface: 11200
+## Title: Totem Tracker
+## Notes: Tracks which party members have Totem buffs
+## Author: YourName
+## Version: 2.0
+
+WindfuryTracker.lua

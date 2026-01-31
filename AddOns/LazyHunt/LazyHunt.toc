@@ -1,0 +1,11 @@
+## Interface: 11200
+## Title: LazyHunt
+## Notes: Frame-based auto-rotation for hunters using HHT timing engine
+## Author: Hamingway
+## Version: 4.0.0
+## Dependencies: HamingwaysHunterTools
+
+## SavedVariablesPerCharacter: LazyHuntDB
+
+LazyHunt.lua
+LazyHunt_Minimap.lua

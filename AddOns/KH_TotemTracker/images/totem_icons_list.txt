@@ -1,0 +1,49 @@
+KH Totem Tracker - Required Icon Files
+========================================
+
+Place TGA files with these exact names in this folder to use custom icons.
+If a file is missing, the addon will use the standard WoW icon instead.
+
+All files should be:
+- TGA format (Targa)
+- Uncompressed, 32-bit with alpha channel
+- Square dimensions (e.g., 128x128, 256x256, 512x512)
+- Round/circular design with transparent background
+
+Air Totems:
+-----------
+Windfury.tga
+Grace_of_Air.tga
+Grounding.tga
+Nature_Resistance.tga
+Windwall.tga
+Tranquil_Air.tga
+
+Fire Totems:
+------------
+Flametongue.tga
+Searing.tga
+Fire_Nova.tga
+Magma.tga
+Frost_Resistance.tga
+
+Earth Totems:
+-------------
+Strength_of_Earth.tga
+Stoneskin.tga
+Tremor.tga
+Stoneclaw.tga
+Earthbind.tga
+
+Water Totems:
+-------------
+Mana_Spring.tga
+Healing_Stream.tga
+Mana_Tide.tga
+Poison_Cleansing.tga
+Disease_Cleansing.tga
+Fire_Resistance.tga
+
+Center Icon:
+------------
+shaman_logo_alpha.tga (already present)

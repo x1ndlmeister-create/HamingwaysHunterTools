@@ -1,0 +1,7 @@
+## Interface: 11200
+## Title: ErrorTest
+## Notes: Test addon to trigger visible error
+## Author: Test
+## Version: 1.0
+
+ErrorTest.lua
