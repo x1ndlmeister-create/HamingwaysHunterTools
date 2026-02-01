@@ -28,6 +28,7 @@ A comprehensive, feature-rich Hunter addon for World of Warcraft Classic (1.12) 
 - **Per-pet food blacklist** - automatically remembers what each pet refuses
 - **Visual happiness indicator** (green/yellow/red background)
 - **Pet portrait** with Call/Dismiss/Revive on click
+- **All-in-one macro included** - smart pet action for keybinds
 - Food inventory tracking with count display
 
 ### Tranq Shot Rotation Tracker
