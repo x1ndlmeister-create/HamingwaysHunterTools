@@ -25,7 +25,7 @@ A comprehensive, feature-rich Hunter addon for World of Warcraft Classic (1.12) 
 
 - **Smart auto-feeding** when pet happiness drops
 - **One-click feeding** with favorite food selection
-- **Food blacklist** - automatically remembers rejected food
+- **Per-pet food blacklist** - automatically remembers what each pet refuses
 - **Visual happiness indicator** (green/yellow/red background)
 - **Pet portrait** with Call/Dismiss/Revive on click
 - Food inventory tracking with count display
