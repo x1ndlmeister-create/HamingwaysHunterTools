@@ -31,6 +31,9 @@ A comprehensive, feature-rich Hunter addon for World of Warcraft Classic (1.12) 
 - Food inventory tracking with count display
 
 ### Tranq Shot Rotation Tracker
+
+![Tranq Shot Rotation](images/tranq-frame.png)
+
 - **Raid-wide cooldown tracking** for all hunters
 - **Visual progress bars** showing CD status per hunter
 - **Missed shot warnings** with fade-in/fade-out effect
