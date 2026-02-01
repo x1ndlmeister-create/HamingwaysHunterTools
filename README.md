@@ -126,27 +126,7 @@ Fully customizable colors for:
 - Cast bar
 - Background opacity
 
-## 🔧 Technical Details
-
-### Performance
-- **Optimized update cycles** - throttled to 10 Hz for non-critical updates
-- **Texture-based buff detection** - 10,000x faster than tooltip scanning
-- **Object pooling** - zero garbage collection in combat
-- **Quiver-level efficiency** - minimal CPU and memory footprint (~400 KB in 40-man raids)
-
-### Lua 5.0 Compatibility
-Fully compatible with WoW 1.12's Lua 5.0 environment:
-- Uses `math.mod()` instead of `%` operator
-- Proper nil-safe comparisons
-- No modern Lua syntax
-
-### Architecture
-- **Modular design** - separate files for Tranq, Warnings, and Pet Feeder
-- **Shared database** - `HamingwaysHunterToolsDB` for all settings
-- **Event-driven updates** - efficient PLAYER_AURAS_CHANGED handling
-- **Texture-based bars** - proper Z-order for text layering
-
-## 🐛 Known Issues
+##  Known Issues
 
 - Auto-feeding requires player-initiated action (WoW 1.10+ limitation)
 - Cast detection relies on SPELLCAST_START event
