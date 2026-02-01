@@ -1459,7 +1459,7 @@ local function ApplyFrameSettings()
             foodIconButton:SetWidth(iconSize)
             foodIconButton:SetHeight(iconSize)
             foodIconButton:ClearAllPoints()
-            petIconButton:SetPoint("LEFT", petIconButton, "RIGHT", 5, 0)
+            foodIconButton:SetPoint("LEFT", petIconButton, "RIGHT", 5, 0)
         end
     end
     
@@ -4342,18 +4342,30 @@ local function CreatePetFeederFrame()
     local cfg = GetConfig()
     local iconSize = cfg.petFeederIconSize or DEFAULT_PET_FEEDER_ICON_SIZE
     local dragPadding = 8  -- Extra padding for easier dragging
-    local frameWidth = iconSize * 2 + 9 + (dragPadding * 2)
-    local frameHeight = iconSize + 4 + (dragPadding * 2)
+    local contentWidth = iconSize * 2 + 9
+    local contentHeight = iconSize + 4
+    local frameWidth = contentWidth + (dragPadding * 2)
+    local frameHeight = contentHeight + (dragPadding * 2)
     
     petFeedFrame = CreateFrame("Frame", "HamingwaysHunterToolsPetFeederFrame", UIParent)
     petFeedFrame:SetWidth(frameWidth)
     petFeedFrame:SetHeight(frameHeight)
     petFeedFrame:SetFrameStrata("MEDIUM")
     petFeedFrame:SetPoint("CENTER", UIParent, "CENTER", 0, -200)
+    petFeedFrame:EnableMouse(true)
+    petFeedFrame:SetMovable(true)
+    petFeedFrame:RegisterForDrag("LeftButton")
     
-    -- Use config settings for backdrop
+    -- Create background frame (smaller than main frame, centered)
+    local bgFrame = CreateFrame("Frame", nil, petFeedFrame)
+    bgFrame:SetWidth(contentWidth)
+    bgFrame:SetHeight(contentHeight)
+    bgFrame:SetPoint("CENTER", petFeedFrame, "CENTER", 0, 0)
+    bgFrame:SetFrameLevel(petFeedFrame:GetFrameLevel())
+    
+    -- Use config settings for backdrop on bgFrame
     if cfg.borderSize > 0 then
-        petFeedFrame:SetBackdrop({
+        bgFrame:SetBackdrop({
             bgFile = "Interface\\BUTTONS\\WHITE8X8",
             edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
             tile = false, 
@@ -4361,7 +4373,7 @@ local function CreatePetFeederFrame()
             insets = { left = 2, right = 2, top = 2, bottom = 2 }
         })
     else
-        petFeedFrame:SetBackdrop({
+        bgFrame:SetBackdrop({
             bgFile = "Interface\\BUTTONS\\WHITE8X8",
             edgeFile = nil,
             tile = false,
@@ -4370,11 +4382,8 @@ local function CreatePetFeederFrame()
         })
     end
     
-    petFeedFrame:SetBackdropColor(0, 0.6, 0, cfg.bgOpacity)
-    petFeedFrame:SetBackdropBorderColor(0.67, 0.83, 0.45, cfg.borderOpacity or 1)
-    petFeedFrame:EnableMouse(true)
-    petFeedFrame:SetMovable(true)
-    petFeedFrame:RegisterForDrag("LeftButton")
+    bgFrame:SetBackdropColor(0, 0.6, 0, cfg.bgOpacity)
+    bgFrame:SetBackdropBorderColor(0.67, 0.83, 0.45, cfg.borderOpacity or 1)
     
     -- Pet Icon Button
     petIconButton = CreateFrame("Button", nil, petFeedFrame)
