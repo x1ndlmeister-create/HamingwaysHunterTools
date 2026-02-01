@@ -66,6 +66,7 @@ A comprehensive, feature-rich Hunter addon for World of Warcraft Classic (1.12) 
 ![Ammo Tracker](images/ammo-frame.png)
 
 - **Ammo counter** displays remaining arrows/bullets
+- **Quick switch** - click to cycle through different ammo types in bags
 - **Low ammo warning** when supply runs low
 - **Automatic detection** of equipped ammo type
 - Clean, minimal display integrated into main frame
