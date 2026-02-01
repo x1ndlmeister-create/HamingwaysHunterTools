@@ -38,6 +38,7 @@ A comprehensive, feature-rich Hunter addon for World of Warcraft Classic (1.12) 
 - **Visual progress bars** showing CD status per hunter
 - **Missed shot warnings** with fade-in/fade-out effect
 - **Automatic rotation management** in raid groups
+- **Quiver-compatible** - works alongside Quiver addon
 - Helps coordinate Tranquilizing Shot on raid bosses
 
 ### Buff & Aspect Warnings
