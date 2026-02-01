@@ -62,6 +62,9 @@ A comprehensive, feature-rich Hunter addon for World of Warcraft Classic (1.12) 
 - Helps optimize your weaving technique
 
 ### Ammunition Tracking
+
+![Ammo Tracker](images/ammo-frame.png)
+
 - **Ammo counter** displays remaining arrows/bullets
 - **Low ammo warning** when supply runs low
 - **Automatic detection** of equipped ammo type
