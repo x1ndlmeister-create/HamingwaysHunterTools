@@ -3,7 +3,7 @@
 -- Autoshot timer matching Quiver's design: red reload, yellow windup
 
 -- Version: x.y.z (x=release 0-9, y=feature 0-999, z=build 0-9999)
-local VERSION = "1.0.1"  -- Fix: Buffbar OnUpdate, Pet Food Blacklisting, Haste detection
+local VERSION = "1.0.2"  -- Fix: Frame dragging improvements, pet feeder transparency
 
 local AH = CreateFrame("Frame", "HamingwaysHunterToolsCore")
 

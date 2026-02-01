@@ -1,6 +1,6 @@
 # Hamingway's HunterTools (Vanilla 1.12)
 
-## Version 0.8.1
+## Version 1.0.2
 
 ### Changes in v0.8.1
 ✅ Hunter Class Check (Addon nur für Jäger)
