@@ -20,6 +20,9 @@ A comprehensive, feature-rich Hunter addon for World of Warcraft Classic (1.12) 
 - Fully customizable colors, sizes, and positions
 
 ### Pet Feeder System
+
+![Pet Feeder](images/pet-frame.png)
+
 - **Smart auto-feeding** when pet happiness drops
 - **One-click feeding** with favorite food selection
 - **Food blacklist** - automatically remembers rejected food
