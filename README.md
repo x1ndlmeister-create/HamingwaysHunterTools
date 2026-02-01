@@ -43,6 +43,9 @@ A comprehensive, feature-rich Hunter addon for World of Warcraft Classic (1.12) 
 - Helps coordinate Tranquilizing Shot on raid bosses
 
 ### Buff & Aspect Warnings
+
+![Aspect Warnings](images/warning-frame.png)
+
 - **Trueshot Aura reminder** with blinking icon
 - **Aspect tracker** - warns when wrong/missing aspect is active
 - **Click-to-cast** - click icons to cast missing buffs
