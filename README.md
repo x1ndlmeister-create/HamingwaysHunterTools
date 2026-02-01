@@ -53,6 +53,9 @@ A comprehensive, feature-rich Hunter addon for World of Warcraft Classic (1.12) 
 - Fully configurable per aspect type
 
 ### Statistics Tracking
+
+![Reaction Statistics](images/reaction-frame.png)
+
 - **Reaction time measurement** between Auto Shot end and cast start
 - Average, best, and worst performance tracking
 - Skipped and delayed cast counters
