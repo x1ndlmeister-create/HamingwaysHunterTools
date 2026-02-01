@@ -3,7 +3,7 @@
 -- Autoshot timer matching Quiver's design: red reload, yellow windup
 
 -- Version: x.y.z (x=release 0-9, y=feature 0-999, z=build 0-9999)
-local VERSION = "1.0.3"  -- Fix: Small memory leak fixes in PetFeeder
+local VERSION = "1.0.2"  -- Fix: Frame dragging improvements, pet feeder transparency
 
 local AH = CreateFrame("Frame", "HamingwaysHunterToolsCore")
 
@@ -20,11 +20,18 @@ local ammoFrame = nil
 local ammoMenuFrame = nil
 local statsFrame = nil
 
+-- Pet Feeder elements
+local petFeedFrame = nil
+local petIconButton = nil
+local foodIconButton = nil
+local foodMenuFrame = nil
+local selectedFood = nil  -- Stores selected food item {bag, slot, name, texture, itemID}
+local lastAttemptedFood = nil  -- Tracks last food attempt for error handling
+
 -- Reaction time tracking (delay between auto-shot and cast start)
 local reactionTimes = {}
 local MAX_REACTION_SAMPLES = 20  -- Keep last 20 reactions
 local lastAutoShotTime = 0  -- Track when auto-shot hit for reaction time stats
-
 
 -- Skipped auto-shots tracking
 local lastCastTime = 0
@@ -177,33 +184,6 @@ end
 -- Init API immediately (closure will access variables at runtime)
 InitAPI()
 
--- MEMORY LEAK FIX: Initialize SmartPetAction once at load time (not on every event)
-HamingwaysHunterTools_API.SmartPetAction = function()
-    if UnitExists("pet") and UnitIsDead("pet") then
-        CastSpellByName("Revive Pet")
-        DEFAULT_CHAT_FRAME:AddMessage("|cFFABD473Hamingway's HunterTools:|r Reviving pet...", 0.67, 0.83, 0.45)
-        return "revive"
-    elseif UnitExists("pet") then
-        local happiness, damagePercent, loyaltyRate = GetPetHappiness()
-        if happiness and happiness < 3 then
-            if HHT_PetFeeder_FeedPet() then
-                return "feed"
-            else
-                DEFAULT_CHAT_FRAME:AddMessage("|cFFABD473Hamingway's HunterTools:|r Cannot feed (no food selected or pet cannot eat it)", WARNING_COLOR.r, WARNING_COLOR.g, WARNING_COLOR.b)
-                return "feed_failed"
-            end
-        else
-            CastSpellByName("Dismiss Pet")
-            DEFAULT_CHAT_FRAME:AddMessage("|cFFABD473Hamingway's HunterTools:|r Dismissing pet...", 0.67, 0.83, 0.45)
-            return "dismiss"
-        end
-    else
-        CastSpellByName("Call Pet")
-        DEFAULT_CHAT_FRAME:AddMessage("|cFFABD473Hamingway's HunterTools:|r Calling pet...", 0.67, 0.83, 0.45)
-        return "call"
-    end
-end
-
 -- Melee Swing Timer State
 local lastMeleeSwingTime = 0
 local meleeSwingSpeed = 2.0
@@ -258,6 +238,16 @@ local castSpells = {
     ["Begleiter entlassen"] = { Time=5000, Offset=0, Haste="none" },
     ["Revive Pet"] = { Time=10000, Offset=0, Haste="none" },
     ["Tier wiederbeleben"] = { Time=10000, Offset=0, Haste="none" },
+}
+
+-- Pet Food Database (Item IDs by diet type)
+local PET_FOODS = {
+    fungus = {4607,8948,4604,4608,4605,3448,4606},
+    fish = {13889,19996,13933,13888,13935,13546,6290,4593,5503,16971,2682,13927,2675,13930,5476,4655,6038,13928,13929,13893,4592,8364,13932,5095,6291,6308,13754,6317,6289,8365,6361,13758,6362,6303,8959,4603,13756,13760,4594,787,5468,15924,12216,8957,6887,5504,12206,13755,7974},
+    meat = {21235,19995,4457,3173,2888,3730,3726,3220,2677,3404,12213,2679,769,2673,2684,1081,12224,5479,2924,3662,4599,17119,5478,5051,12217,2687,9681,2287,12204,3727,13851,12212,5472,5467,5480,1015,12209,3731,12223,3770,12037,4739,12184,13759,12203,12210,2681,5474,8952,1017,5465,6890,3712,3729,2680,17222,5471,5469,5477,2672,2685,3728,3667,12208,18045,5470,12202,117,12205,3771},
+    bread = {1113,5349,1487,1114,8075,8076,22895,19696,21254,2683,4541,17197,3666,8950,4542,4544,4601,4540,16169},
+    cheese = {8932,414,2070,422,3927,1707},
+    fruit = {19994,8953,4539,16168,4602,4536,4538,4537,11950},
 }
 
 -- Ammo database (Item IDs) - 10000x faster than tooltip scanning!
@@ -1442,34 +1432,34 @@ local function ApplyFrameSettings()
     end
     
     -- Apply settings to Pet Feeder Frame
-    if HHT_PetFeedFrame then
+    if petFeedFrame then
         local iconSize = cfg.petFeederIconSize or DEFAULT_PET_FEEDER_ICON_SIZE
         local dragPadding = 8  -- Extra padding for easier dragging
         local frameWidth = iconSize * 2 + 9 + (dragPadding * 2)
         local frameHeight = iconSize + 4 + (dragPadding * 2)
         
-        HHT_PetFeedFrame:SetWidth(frameWidth)
-        HHT_PetFeedFrame:SetHeight(frameHeight)
+        petFeedFrame:SetWidth(frameWidth)
+        petFeedFrame:SetHeight(frameHeight)
         
         local backdrop, br, bg, bb, ba = CreateBackdrop(cfg.borderSize)
-        HHT_PetFeedFrame:SetBackdrop(backdrop)
+        petFeedFrame:SetBackdrop(backdrop)
         
         -- Keep green color but apply config opacity and border from CreateBackdrop
-        HHT_PetFeedFrame:SetBackdropColor(0, 0.6, 0, cfg.bgOpacity)
-        HHT_PetFeedFrame:SetBackdropBorderColor(br, bg, bb, ba)
+        petFeedFrame:SetBackdropColor(0, 0.6, 0, cfg.bgOpacity)
+        petFeedFrame:SetBackdropBorderColor(br, bg, bb, ba)
         
         -- Update icon sizes and positions
-        if HHT_PetIconButton then
-            HHT_PetIconButton:SetWidth(iconSize)
-            HHT_PetIconButton:SetHeight(iconSize)
-            HHT_PetIconButton:ClearAllPoints()
-            HHT_PetIconButton:SetPoint("LEFT", HHT_PetFeedFrame, "LEFT", 2 + dragPadding, 0)
+        if petIconButton then
+            petIconButton:SetWidth(iconSize)
+            petIconButton:SetHeight(iconSize)
+            petIconButton:ClearAllPoints()
+            petIconButton:SetPoint("LEFT", petFeedFrame, "LEFT", 2 + dragPadding, 0)
         end
-        if HHT_FoodIconButton then
-            HHT_FoodIconButton:SetWidth(iconSize)
-            HHT_FoodIconButton:SetHeight(iconSize)
-            HHT_FoodIconButton:ClearAllPoints()
-            HHT_FoodIconButton:SetPoint("LEFT", HHT_PetIconButton, "RIGHT", 5, 0)
+        if foodIconButton then
+            foodIconButton:SetWidth(iconSize)
+            foodIconButton:SetHeight(iconSize)
+            foodIconButton:ClearAllPoints()
+            foodIconButton:SetPoint("LEFT", petIconButton, "RIGHT", 5, 0)
         end
     end
     
@@ -1540,12 +1530,12 @@ local function UpdateFrameVisibility()
     end
     
     -- Pet Feeder - respect show toggle
-    if HHT_PetFeedFrame then
+    if petFeedFrame then
         if not HamingwaysHunterToolsDB.showPetFeeder then
-            HHT_PetFeedFrame:Hide()
+            petFeedFrame:Hide()
         else
             -- Show immediately (UpdatePetFeederDisplay will be called by event handlers)
-            HHT_PetFeedFrame:Show()
+            petFeedFrame:Show()
         end
     end
 end
@@ -1699,6 +1689,425 @@ local function UpdateBuffCountdowns()
             end
         end
     end
+end
+
+-- ============ Pet Feeder Functions ============
+local function HasPet()
+    if not UnitExists("pet") then return false end
+    local petName = UnitName("pet")
+    if petName == "Unknown Entity" or petName == "Unknown" or petName == UNKNOWNOBJECT then
+        return false
+    end
+    return true
+end
+
+local function HasFeedEffect()
+    -- Check for "Feed Pet Effect" buff by scanning tooltip text
+    -- Note: GetPlayerBuffTexture() only works for player buffs, not pet buffs in Vanilla
+    -- Since this is called infrequently (~1x/minute) and pets have few buffs (5-10 max),
+    -- the tooltip scan performance impact is negligible (~2ms)
+    local i = 1
+    while UnitBuff("pet", i) do
+        if HamingwaysHunterToolsTooltip then
+            HamingwaysHunterToolsTooltip:SetOwner(UIParent, "ANCHOR_NONE")
+            HamingwaysHunterToolsTooltip:SetUnitBuff("pet", i)
+            local buffName = HamingwaysHunterToolsTooltipTextLeft1:GetText()
+            HamingwaysHunterToolsTooltip:Hide()
+            
+            -- Check for exact buff name (localized)
+            if buffName and (
+               string.find(buffName, "Feed Pet Effect") or  -- English
+               string.find(buffName, "Haustier.*Effect") or  -- German (Haustier füttern Effect)
+               string.find(buffName, "Effet.*familier")      -- French
+            ) then
+                return true
+            end
+        end
+        i = i + 1
+    end
+    return false
+end
+
+local function IsPetFoodByID(itemID)
+    if not itemID then return false end
+    if not UnitExists("pet") then return false end
+    
+    local foodTypes = {GetPetFoodTypes()}
+    if not foodTypes or table.getn(foodTypes) == 0 then return false end
+    
+    for _, foodType in ipairs(foodTypes) do
+        local diet = string.lower(foodType)
+        if PET_FOODS[diet] then
+            for _, foodID in ipairs(PET_FOODS[diet]) do
+                if foodID == itemID then
+                    return true
+                end
+            end
+        end
+    end
+    
+    return false
+end
+
+local function FindPetFoodInBags()
+    if not HasPet() then return {} end
+    
+    local foodList = {}
+    local foodCounts = {}
+    local petName = UnitName("pet")
+    local cfg = GetConfig()
+    local blacklist = cfg.petFoodBlacklist[petName] or {}
+    
+    for bag = 0, 4 do
+        local numSlots = GetContainerNumSlots(bag)
+        if numSlots and numSlots > 0 then
+            for slot = 1, numSlots do
+                local texture, count = GetContainerItemInfo(bag, slot)
+                if texture and count then
+                    local itemLink = GetContainerItemLink(bag, slot)
+                    if itemLink then
+                        local _, _, itemID = string.find(itemLink, "item:(%d+)")
+                        itemID = tonumber(itemID)
+                        
+                        -- Check if item is blacklisted for this pet
+                        local isBlacklisted = false
+                        if itemID and blacklist then
+                            for i = 1, table.getn(blacklist) do
+                                if blacklist[i] == itemID then
+                                    isBlacklisted = true
+                                    break
+                                end
+                            end
+                        end
+                        
+                        if itemID and IsPetFoodByID(itemID) and not isBlacklisted then
+                            local itemName = GetItemInfo(itemID)
+                            if itemName then
+                                if foodCounts[itemName] then
+                                    foodCounts[itemName].count = foodCounts[itemName].count + count
+                                else
+                                    foodCounts[itemName] = {
+                                        bag = bag,
+                                        slot = slot,
+                                        name = itemName,
+                                        texture = texture,
+                                        count = count,
+                                        itemID = itemID
+                                    }
+                                    table.insert(foodList, foodCounts[itemName])
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    
+    return foodList
+end
+
+local function FeedPet(silent)
+    if not HasPet() then
+        if not silent then
+            DEFAULT_CHAT_FRAME:AddMessage("|cFFABD473Hamingway's HunterTools:|r No pet active", WARNING_COLOR.r, WARNING_COLOR.g, WARNING_COLOR.b)
+        end
+        return false
+    end
+    
+    if UnitHealth("pet") <= 0 then
+        if not silent then
+            DEFAULT_CHAT_FRAME:AddMessage("|cFFABD473Hamingway's HunterTools:|r Pet is dead", WARNING_COLOR.r, WARNING_COLOR.g, WARNING_COLOR.b)
+        end
+        return false
+    end
+    
+    -- Don't feed while casting
+    if isCasting then
+        return false  -- Silent check for casting
+    end
+    
+    if HasFeedEffect() then
+        return false  -- Already feeding
+    end
+    
+    -- Check if we recently fed (within last 15 seconds) - prevents double feeding while buff applies
+    if petFeedFrame and petFeedFrame.lastSuccessfulFeed then
+        local timeSinceLastFeed = GetTime() - petFeedFrame.lastSuccessfulFeed
+        if timeSinceLastFeed < 15 then
+            return false
+        end
+    end
+    
+    local foodToFeed = nil
+    local petName = UnitName("pet")
+    
+    -- Load pet-specific selected food
+    if petName and HamingwaysHunterToolsDB.selectedFood and HamingwaysHunterToolsDB.selectedFood[petName] then
+        selectedFood = HamingwaysHunterToolsDB.selectedFood[petName]
+    end
+    
+    -- Use selected food if available
+    if selectedFood then
+        local texture, count = GetContainerItemInfo(selectedFood.bag, selectedFood.slot)
+        if texture and count then
+            foodToFeed = selectedFood
+        else
+            selectedFood = nil  -- Clear invalid selection
+            if HamingwaysHunterToolsDB.selectedFood then
+                HamingwaysHunterToolsDB.selectedFood[petName] = nil
+            end
+        end
+    end
+    
+    -- Find any pet food if no selection
+    if not foodToFeed then
+        local foodList = FindPetFoodInBags()
+        if table.getn(foodList) > 0 then
+            foodToFeed = foodList[1]  -- Use first available food
+            selectedFood = foodToFeed  -- Remember for next time
+            HamingwaysHunterToolsDB.selectedFood = HamingwaysHunterToolsDB.selectedFood or {}
+            HamingwaysHunterToolsDB.selectedFood[petName] = foodToFeed
+        end
+    end
+    
+    if foodToFeed then
+        -- Store the food we're about to attempt to feed (for error tracking)
+        lastAttemptedFood = {
+            itemID = foodToFeed.itemID,
+            name = foodToFeed.name,
+            petName = petName
+        }
+        
+        PickupContainerItem(foodToFeed.bag, foodToFeed.slot)
+        local hasCursor = CursorHasItem()
+        
+        if hasCursor then
+            -- Suppress error sounds in silent mode (auto-feed)
+            local oldUIErrorsFrameShow = nil
+            if silent and UIErrorsFrame then
+                oldUIErrorsFrameShow = UIErrorsFrame.Show
+                UIErrorsFrame.Show = function() end
+            end
+            
+            DropItemOnUnit("pet")
+            
+            -- Restore error frame
+            if silent and UIErrorsFrame and oldUIErrorsFrameShow then
+                UIErrorsFrame.Show = oldUIErrorsFrameShow
+            end
+            
+            -- Check if drop was successful (cursor should be empty now)
+            if CursorHasItem() then
+                -- Drop failed, put item back (protected function restriction)
+                PickupContainerItem(foodToFeed.bag, foodToFeed.slot)
+                -- Don't spam chat in silent mode (auto-feed will retry on next target change)
+                return false
+            end
+            if not silent then
+                DEFAULT_CHAT_FRAME:AddMessage("|cFFABD473Hamingway's HunterTools:|r Feeding " .. petName .. " with " .. foodToFeed.name, 0.67, 0.83, 0.45)
+            end
+            -- Mark time of successful feed to prevent double-feeding
+            if petFeedFrame then
+                petFeedFrame.lastSuccessfulFeed = GetTime()
+            end
+            -- Update display will happen via events
+            return true
+        end
+    else
+        if not silent then
+            DEFAULT_CHAT_FRAME:AddMessage("|cFFABD473Hamingway's HunterTools:|r No suitable pet food found", WARNING_COLOR.r, WARNING_COLOR.g, WARNING_COLOR.b)
+        end
+    end
+    
+    return false
+end
+
+local function UpdatePetFeederDisplay()
+    -- Early exit: Frame doesn't exist
+    if not petFeedFrame then return end
+    
+    -- PERFORMANCE: Direct DB access instead of GetCachedConfig() - called from event handler
+    if not HamingwaysHunterToolsDB or not HamingwaysHunterToolsDB.showPetFeeder then
+        petFeedFrame:Hide()
+        return
+    end
+    
+    if UnitExists("pet") and UnitIsDead("pet") then
+        -- Pet is dead: Show Revive Pet icon
+        if petIconButton and petIconButton.icon then
+            petIconButton.icon:SetTexture("Interface\\Icons\\Ability_Hunter_BeastSoothe")
+        end
+        -- Red background when pet is dead
+        if petFeedFrame then
+            petFeedFrame:SetBackdropColor(UNHAPPY_COLOR_RED, 0, 0, HamingwaysHunterToolsDB.bgOpacity)
+        end
+        petFeedFrame:Show()
+        return
+    end
+    
+    if not HasPet() then
+        -- No pet: Show default icon
+        if petIconButton and petIconButton.icon then
+            petIconButton.icon:SetTexture("Interface\\Icons\\Ability_Hunter_BeastCall")
+        end
+        -- Gray background when no pet
+        if petFeedFrame then
+            petFeedFrame:SetBackdropColor(INACTIVE_COLOR_GRAY, INACTIVE_COLOR_GRAY, INACTIVE_COLOR_GRAY, HamingwaysHunterToolsDB.bgOpacity)
+        end
+        petFeedFrame:Show()
+        return
+    end
+    
+    -- Pet exists: Show actual pet icon from unit frame
+    if petIconButton and petIconButton.icon then
+        SetPortraitTexture(petIconButton.icon, "pet")
+    end
+    
+    -- Update frame background based on happiness
+    local happiness = GetPetHappiness()
+    if happiness and petFeedFrame then
+        if happiness == 1 then
+            -- Unhappy (red)
+            petFeedFrame:SetBackdropColor(UNHAPPY_COLOR_RED, 0, 0, HamingwaysHunterToolsDB.bgOpacity)
+        elseif happiness == 2 then
+            -- Content (yellow/orange)
+            petFeedFrame:SetBackdropColor(UNHAPPY_COLOR_RED, CONTENT_COLOR_ORANGE, 0, HamingwaysHunterToolsDB.bgOpacity)
+        elseif happiness == 3 then
+            -- Happy (green)
+            petFeedFrame:SetBackdropColor(0, HAPPY_COLOR_GREEN, 0, HamingwaysHunterToolsDB.bgOpacity)
+        else
+            -- Unknown (gray)
+            petFeedFrame:SetBackdropColor(INACTIVE_COLOR_GRAY, INACTIVE_COLOR_GRAY, INACTIVE_COLOR_GRAY, HamingwaysHunterToolsDB.bgOpacity)
+        end
+    end
+    
+    -- Load pet-specific food selection
+    local petName = UnitName("pet")
+    if petName and HamingwaysHunterToolsDB.selectedFood and HamingwaysHunterToolsDB.selectedFood[petName] then
+        selectedFood = HamingwaysHunterToolsDB.selectedFood[petName]
+    end
+    
+    -- Update food icon
+    if selectedFood then
+        -- Get current count from bags
+        local currentCount = 0
+        local foodList = FindPetFoodInBags()
+        for i = 1, table.getn(foodList) do
+            if foodList[i].itemID == selectedFood.itemID then
+                currentCount = foodList[i].count
+                break
+            end
+        end
+        
+        if foodIconButton and foodIconButton.icon then
+            foodIconButton.icon:SetTexture(selectedFood.texture)
+            -- Gray out food icon when pet has feed effect
+            if HasFeedEffect() then
+                foodIconButton.icon:SetVertexColor(0.4, 0.4, 0.4)
+            else
+                foodIconButton.icon:SetVertexColor(1, 1, 1)
+            end
+            if foodIconButton.countText then
+                foodIconButton.countText:SetText(currentCount > 1 and tostring(currentCount) or "")
+            end
+        end
+    else
+        if foodIconButton and foodIconButton.icon then
+            foodIconButton.icon:SetTexture("Interface\\Icons\\INV_Misc_QuestionMark")
+            if foodIconButton.countText then
+                foodIconButton.countText:SetText("")
+            end
+        end
+    end
+    
+    petFeedFrame:Show()
+end
+
+local function ShowFoodMenu()
+    if not foodMenuFrame then return end
+    if not HasPet() then
+        DEFAULT_CHAT_FRAME:AddMessage("|cFFABD473Hamingway's HunterTools:|r No pet active", 1, 0.5, 0)
+        return
+    end
+    
+    local foodList = FindPetFoodInBags()
+    if table.getn(foodList) == 0 then
+        DEFAULT_CHAT_FRAME:AddMessage("|cFFABD473Hamingway's HunterTools:|r No pet food found in bags", 1, 0.5, 0)
+        return
+    end
+    
+    -- Clear existing buttons
+    if foodMenuFrame.buttons then
+        for _, btn in ipairs(foodMenuFrame.buttons) do
+            btn:Hide()
+        end
+    end
+    foodMenuFrame.buttons = {}
+    
+    -- Position menu next to food icon
+    foodMenuFrame:ClearAllPoints()
+    if foodIconButton then
+        foodMenuFrame:SetPoint("LEFT", foodIconButton, "RIGHT", 5, 0)
+    else
+        foodMenuFrame:SetPoint("CENTER", UIParent, "CENTER")
+    end
+    
+    local yOffset = -5
+    for i, food in ipairs(foodList) do
+        local btn = CreateFrame("Button", nil, foodMenuFrame)
+        btn:SetWidth(150)
+        btn:SetHeight(24)
+        btn:SetPoint("TOPLEFT", 5, yOffset)
+        
+        btn.icon = btn:CreateTexture(nil, "BACKGROUND")
+        btn.icon:SetWidth(20)
+        btn.icon:SetHeight(20)
+        btn.icon:SetTexture(food.texture)
+        btn.icon:SetPoint("LEFT", 2, 0)
+        
+        btn.text = btn:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        btn.text:SetPoint("LEFT", 26, 0)
+        btn.text:SetText(food.name .. " (" .. food.count .. ")")
+        btn.text:SetTextColor(1, 1, 1)
+        
+        -- Store food reference on button to avoid closure issues
+        btn.foodData = food
+        btn:SetScript("OnClick", function()
+            if HasPet() then
+                local petName = UnitName("pet")
+                local foodData = {
+                    bag = this.foodData.bag,
+                    slot = this.foodData.slot,
+                    name = this.foodData.name,
+                    texture = this.foodData.texture,
+                    count = this.foodData.count,
+                    itemID = this.foodData.itemID
+                }
+                selectedFood = foodData
+                HamingwaysHunterToolsDB.selectedFood = HamingwaysHunterToolsDB.selectedFood or {}
+                HamingwaysHunterToolsDB.selectedFood[petName] = foodData
+                UpdatePetFeederDisplay()
+                foodMenuFrame:Hide()
+            end
+        end)
+        
+        btn:SetScript("OnEnter", function()
+            btn.text:SetTextColor(1, 1, 0)
+        end)
+        
+        btn:SetScript("OnLeave", function()
+            btn.text:SetTextColor(1, 1, 1)
+        end)
+        
+        table.insert(foodMenuFrame.buttons, btn)
+        yOffset = yOffset - 24
+    end
+    
+    -- Set frame height dynamically based on number of items
+    local menuHeight = table.getn(foodList) * 24 + 10
+    foodMenuFrame:SetHeight(menuHeight)
+    foodMenuFrame:Show()
 end
 
 -- ============ Ammo Frame Functions ============
@@ -2474,19 +2883,19 @@ local function ShowConfigPreview()
     end
     
     -- Show Pet Feeder frame with preview (ALWAYS)
-    if not HHT_PetFeedFrame then
-        HHT_PetFeeder_Initialize(MakeDraggable, CreateBackdrop)
+    if not petFeedFrame then
+        CreatePetFeederFrame()
     end
-    if HHT_PetFeedFrame and HHT_PetIconButton and HHT_FoodIconButton then
+    if petFeedFrame and petIconButton and foodIconButton then
         -- Set preview pet icon
-        if HHT_PetIconButton.icon then
-            HHT_PetIconButton.icon:SetTexture("Interface\\Icons\\Ability_Hunter_Pet_Wolf")
+        if petIconButton.icon then
+            petIconButton.icon:SetTexture("Interface\\Icons\\Ability_Hunter_Pet_Wolf")
         end
         -- Set preview food icon
-        if HHT_FoodIconButton.icon then
-            HHT_FoodIconButton.icon:SetTexture("Interface\\Icons\\INV_Misc_Food_94_Haunch")
+        if foodIconButton.icon then
+            foodIconButton.icon:SetTexture("Interface\\Icons\\INV_Misc_Food_94_Haunch")
         end
-        HHT_PetFeedFrame:Show()
+        petFeedFrame:Show()
     end
     
     -- Show Warning frames with preview (ALWAYS - force show both warnings)
@@ -2532,12 +2941,12 @@ local function HideConfigPreview()
     end
     
     -- Clear pet feeder preview
-    if HHT_PetFeedFrame and HHT_PetIconButton and HHT_FoodIconButton then
-        if HHT_PetIconButton.icon then
-            HHT_PetIconButton.icon:SetTexture("")
+    if petFeedFrame and petIconButton and foodIconButton then
+        if petIconButton.icon then
+            petIconButton.icon:SetTexture("")
         end
-        if HHT_FoodIconButton.icon then
-            HHT_FoodIconButton.icon:SetTexture("")
+        if foodIconButton.icon then
+            foodIconButton.icon:SetTexture("")
         end
     end
     
@@ -2559,7 +2968,7 @@ local function HideConfigPreview()
     
     -- Trigger normal updates to show real data
     UpdateAmmoDisplay()
-    HHT_PetFeeder_UpdateDisplay()
+    UpdatePetFeederDisplay()
     if HHT_UpdateWarningDisplay then
         HHT_UpdateWarningDisplay()
     end
@@ -2979,7 +3388,7 @@ local function CreateConfigFrame()
         HamingwaysHunterToolsDB.showPetFeeder = this:GetChecked() and true or false
         UpdateFrameVisibility()
         if HamingwaysHunterToolsDB.showPetFeeder then
-            HHT_PetFeeder_UpdateDisplay()
+            UpdatePetFeederDisplay()
         end
     end)
     
@@ -3025,12 +3434,12 @@ local function CreateConfigFrame()
     resetBlacklistBtn:SetPoint("TOPLEFT", 20, -340)
     resetBlacklistBtn:SetText("Reset Blacklisted Food")
     resetBlacklistBtn:SetScript("OnClick", function()
-        if UnitExists("pet") then
+        if HasPet() then
             local petName = UnitName("pet")
             if HamingwaysHunterToolsDB.petFoodBlacklist and HamingwaysHunterToolsDB.petFoodBlacklist[petName] then
                 HamingwaysHunterToolsDB.petFoodBlacklist[petName] = {}
                 DEFAULT_CHAT_FRAME:AddMessage("|cFFABD473Hamingway's HunterTools:|r Blacklist cleared for " .. petName, 0.67, 0.83, 0.45)
-                HHT_PetFeeder_UpdateDisplay()
+                UpdatePetFeederDisplay()
             else
                 DEFAULT_CHAT_FRAME:AddMessage("|cFFABD473Hamingway's HunterTools:|r No blacklisted food for " .. petName, 1, 1, 0)
             end
@@ -3328,8 +3737,8 @@ local function CreateConfigFrame()
         if stats then
             stats:EnableMouse(not locked)
         end
-        if HHT_PetFeedFrame then
-            HHT_PetFeedFrame:EnableMouse(not locked)
+        if petFeedFrame then
+            petFeedFrame:EnableMouse(not locked)
         end
         if HHT_Tranq_UpdateLock then
             HHT_Tranq_UpdateLock()
@@ -3582,7 +3991,7 @@ local function CreateConfigFrame()
         
         -- Update reset blacklist button visibility
         if tabContents[6] and tabContents[6].resetBlacklistBtn then
-            if UnitExists("pet") then
+            if HasPet() then
                 tabContents[6].resetBlacklistBtn:Show()
             else
                 tabContents[6].resetBlacklistBtn:Hide()
@@ -3929,6 +4338,187 @@ local function CreateHasteFrame(mainFrame)
     end)
 end
 
+local function CreatePetFeederFrame()
+    local cfg = GetConfig()
+    local iconSize = cfg.petFeederIconSize or DEFAULT_PET_FEEDER_ICON_SIZE
+    local dragPadding = 8  -- Extra padding for easier dragging
+    local contentWidth = iconSize * 2 + 9
+    local contentHeight = iconSize + 4
+    local frameWidth = contentWidth + (dragPadding * 2)
+    local frameHeight = contentHeight + (dragPadding * 2)
+    
+    petFeedFrame = CreateFrame("Frame", "HamingwaysHunterToolsPetFeederFrame", UIParent)
+    petFeedFrame:SetWidth(frameWidth)
+    petFeedFrame:SetHeight(frameHeight)
+    petFeedFrame:SetFrameStrata("MEDIUM")
+    petFeedFrame:SetPoint("CENTER", UIParent, "CENTER", 0, -200)
+    petFeedFrame:SetAlpha(0)  -- Main frame is invisible (only for dragging)
+    petFeedFrame:EnableMouse(true)
+    petFeedFrame:SetMovable(true)
+    petFeedFrame:RegisterForDrag("LeftButton")
+    
+    -- Create background frame (smaller than main frame, centered)
+    local bgFrame = CreateFrame("Frame", nil, petFeedFrame)
+    bgFrame:SetWidth(contentWidth)
+    bgFrame:SetHeight(contentHeight)
+    bgFrame:SetPoint("CENTER", petFeedFrame, "CENTER", 0, 0)
+    bgFrame:SetFrameLevel(petFeedFrame:GetFrameLevel())
+    
+    -- Use config settings for backdrop on bgFrame
+    if cfg.borderSize > 0 then
+        bgFrame:SetBackdrop({
+            bgFile = "Interface\\BUTTONS\\WHITE8X8",
+            edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+            tile = false, 
+            edgeSize = cfg.borderSize,
+            insets = { left = 2, right = 2, top = 2, bottom = 2 }
+        })
+    else
+        bgFrame:SetBackdrop({
+            bgFile = "Interface\\BUTTONS\\WHITE8X8",
+            edgeFile = nil,
+            tile = false,
+            edgeSize = 0,
+            insets = { left = 0, right = 0, top = 0, bottom = 0 }
+        })
+    end
+    
+    bgFrame:SetBackdropColor(0, 0.6, 0, cfg.bgOpacity)
+    bgFrame:SetBackdropBorderColor(0.67, 0.83, 0.45, cfg.borderOpacity or 1)
+    
+    -- Pet Icon Button
+    petIconButton = CreateFrame("Button", nil, petFeedFrame)
+    petIconButton:SetWidth(iconSize)
+    petIconButton:SetHeight(iconSize)
+    petIconButton:SetPoint("LEFT", petFeedFrame, "LEFT", 2 + dragPadding, 0)
+    
+    petIconButton.icon = petIconButton:CreateTexture(nil, "BACKGROUND")
+    petIconButton.icon:SetAllPoints()
+    petIconButton.icon:SetTexture("Interface\\Icons\\Ability_Hunter_BeastCall")
+    petIconButton.icon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
+    
+    petIconButton:RegisterForClicks("LeftButtonUp")
+    
+    petIconButton:SetScript("OnClick", function()
+        if arg1 ~= "LeftButton" then return end
+        
+        if UnitExists("pet") and UnitIsDead("pet") then
+            -- Pet is dead, revive it
+            CastSpellByName("Revive Pet")
+        elseif HasPet() then
+            -- Pet is active, dismiss it
+            CastSpellByName("Dismiss Pet")
+        else
+            -- No pet active, call pet
+            CastSpellByName("Call Pet")
+        end
+        -- Delay update to allow pet summon to complete
+        if not this.updateTimer then
+            this.updateTimer = 0
+        end
+        this.updateTimer = 0.5
+        this:SetScript("OnUpdate", function()
+            if this.updateTimer and this.updateTimer > 0 then
+                this.updateTimer = this.updateTimer - arg1
+                if this.updateTimer <= 0 then
+                    UpdatePetFeederDisplay()
+                    this:SetScript("OnUpdate", nil)
+                    this.updateTimer = nil
+                end
+            end
+        end)
+    end)
+    
+    petIconButton:SetScript("OnEnter", function()
+        GameTooltip:SetOwner(this, "ANCHOR_RIGHT")
+        if UnitExists("pet") and UnitIsDead("pet") then
+            GameTooltip:SetText("Revive Pet", 1, 0.2, 0.2)
+            GameTooltip:AddLine("Click to revive your pet", 0.8, 0.8, 0.8)
+        elseif HasPet() then
+            GameTooltip:SetUnit("pet")
+            GameTooltip:AddLine(" ", 1, 1, 1)
+            GameTooltip:AddLine("Left click: Dismiss pet", 0.8, 0.8, 0.8)
+        else
+            GameTooltip:SetText("Call Pet", 1, 1, 1)
+            GameTooltip:AddLine("Click to call your pet", 0.8, 0.8, 0.8)
+        end
+        GameTooltip:Show()
+    end)
+    
+    petIconButton:SetScript("OnLeave", function()
+        GameTooltip:Hide()
+    end)
+    
+    -- Food Icon Button
+    foodIconButton = CreateFrame("Button", nil, petFeedFrame)
+    foodIconButton:SetWidth(iconSize)
+    foodIconButton:SetHeight(iconSize)
+    foodIconButton:SetPoint("LEFT", petIconButton, "RIGHT", 5, 0)
+    
+    foodIconButton.icon = foodIconButton:CreateTexture(nil, "BACKGROUND")
+    foodIconButton.icon:SetAllPoints()
+    foodIconButton.icon:SetTexture("Interface\\Icons\\INV_Misc_QuestionMark")
+    foodIconButton.icon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
+    
+    foodIconButton.countText = foodIconButton:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    foodIconButton.countText:SetPoint("BOTTOMRIGHT", -2, 2)
+    foodIconButton.countText:SetTextColor(1, 1, 1, 1)
+    
+    foodIconButton:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+    
+    foodIconButton:SetScript("OnClick", function()
+        local cfg = GetConfig()
+        if arg1 == "LeftButton" then
+            if cfg.feedOnClick then
+                -- Left click: Feed pet with selected food (if enabled)
+                FeedPet()
+            end
+        elseif arg1 == "RightButton" then
+            -- Right click: Show food menu
+            ShowFoodMenu()
+        end
+    end)
+    
+    foodIconButton:SetScript("OnEnter", function()
+        local cfg = GetCachedConfig()
+        GameTooltip:SetOwner(this, "ANCHOR_RIGHT")
+        GameTooltip:SetText("Pet Food", 1, 1, 1)
+        if cfg.feedOnClick then
+            GameTooltip:AddLine("Left click: Feed pet", 0.8, 0.8, 0.8)
+        end
+        GameTooltip:AddLine("Right click: Select food", 0.8, 0.8, 0.8)
+        if selectedFood then
+            GameTooltip:AddLine(" ", 1, 1, 1)
+            GameTooltip:AddLine("Current: " .. selectedFood.name, 0.67, 0.83, 0.45)
+        end
+        GameTooltip:Show()
+    end)
+    
+    foodIconButton:SetScript("OnLeave", function()
+        GameTooltip:Hide()
+    end)
+    
+    -- Track last auto-feed attempt time (to prevent spam)
+    petFeedFrame.lastAutoFeedAttempt = 0
+    
+    -- Food Menu Frame
+    foodMenuFrame = CreateFrame("Frame", "HamingwaysHunterToolsPetFoodMenu", UIParent)
+    foodMenuFrame:SetFrameStrata("DIALOG")
+    
+    local backdrop = CreateBackdrop(cfg.borderSize)
+    foodMenuFrame:SetBackdrop(backdrop)
+    
+    foodMenuFrame:SetBackdropColor(cfg.bgColor.r, cfg.bgColor.g, cfg.bgColor.b, cfg.bgOpacity)
+    foodMenuFrame:SetBackdropBorderColor(1, 1, 1, cfg.borderOpacity or 1)
+    foodMenuFrame:EnableMouse(true)
+    foodMenuFrame:SetWidth(160)
+    foodMenuFrame:SetHeight(100)
+    foodMenuFrame:Hide()
+    
+    -- Dragging for Pet Feeder Frame
+    MakeDraggable(petFeedFrame, "petFeed")
+end
+
 local function CreateMainFrame()
     frame = CreateFrame("Frame", "HamingwaysHunterToolsFrame", UIParent)
     frame:SetWidth(240)
@@ -4005,7 +4595,7 @@ local function CreateUI()
     UpdateStatsDragState()  -- Initialize drag state
     
     -- Create Pet Feeder Frame
-    HHT_PetFeeder_Initialize(MakeDraggable, CreateBackdrop)
+    CreatePetFeederFrame()
     
     -- Create Haste Buff Tracker
     CreateHasteFrame(mainFrame)
@@ -4131,9 +4721,12 @@ AH:RegisterEvent("PLAYER_LOGOUT")
 
 -- ============ Event Handler Functions (split to reduce upvalues) ============
 local function HandleAddonLoaded()
+    -- Check if player is a Hunter - do this BEFORE anything else
+    -- Note: UnitClass might not be ready yet, so we check silently here and show message later
     local _, playerClass = UnitClass("player")
     if playerClass and playerClass ~= "HUNTER" then
         isHunter = false
+        -- Don't show message yet - will be shown at PLAYER_ENTERING_WORLD
         return
     end
     isHunter = true
@@ -4156,18 +4749,18 @@ local function HandleAddonLoaded()
         statsFrame:ClearAllPoints()
         statsFrame:SetPoint(cfg.statsPoint, UIParent, cfg.statsPoint, cfg.statsX, cfg.statsY)
     end
-    if HHT_PetFeedFrame and HamingwaysHunterToolsDB.petFeedX and HamingwaysHunterToolsDB.petFeedY and HamingwaysHunterToolsDB.petFeedPoint then
-        HHT_PetFeedFrame:ClearAllPoints()
-        HHT_PetFeedFrame:SetPoint(HamingwaysHunterToolsDB.petFeedPoint, UIParent, HamingwaysHunterToolsDB.petFeedPoint, HamingwaysHunterToolsDB.petFeedX, HamingwaysHunterToolsDB.petFeedY)
+    if petFeedFrame and HamingwaysHunterToolsDB.petFeedX and HamingwaysHunterToolsDB.petFeedY and HamingwaysHunterToolsDB.petFeedPoint then
+        petFeedFrame:ClearAllPoints()
+        petFeedFrame:SetPoint(HamingwaysHunterToolsDB.petFeedPoint, UIParent, HamingwaysHunterToolsDB.petFeedPoint, HamingwaysHunterToolsDB.petFeedX, HamingwaysHunterToolsDB.petFeedY)
     end
     ApplyFrameSettings()
     print("HHT: loaded (Quiver-style timer, use /HamingwaysHunterTools test)")
     frame:Show()
     UpdateWeaponSpeed()
     UpdateFrameVisibility()
-    UpdateAurasEventRegistration()
+    UpdateAurasEventRegistration()  -- Initial auras event registration
     if statsFrame then UpdateStatsDisplay() end
-    if HHT_PetFeedFrame then HHT_PetFeeder_UpdateDisplay() end
+    if petFeedFrame then UpdatePetFeederDisplay() end
 end
 
 local function HandlePlayerEnteringWorld()
@@ -4184,7 +4777,7 @@ local function HandlePlayerEnteringWorld()
         AH:RegisterEvent("UI_ERROR_MESSAGE")
         AH:RegisterEvent("UNIT_PET")
         -- Register pet-specific events if pet is active
-        if UnitExists("pet") then
+        if HasPet() then
             AH:RegisterEvent("UNIT_HAPPINESS")
             AH:RegisterEvent("PET_BAR_UPDATE")
             AH:RegisterEvent("PLAYER_TARGET_CHANGED")
@@ -4219,8 +4812,8 @@ local function HandleAurasChanged()
     lastAuraUpdateCheck = now
     
     -- Update pet feeder when buffs change (throttled)
-    if HamingwaysHunterToolsDB and HamingwaysHunterToolsDB.showPetFeeder and HHT_PetFeedFrame and UnitExists("pet") then
-        HHT_PetFeeder_UpdateDisplay()
+    if HamingwaysHunterToolsDB and HamingwaysHunterToolsDB.showPetFeeder and petFeedFrame and HasPet() then
+        UpdatePetFeederDisplay()
     end
     
     -- Update warnings (throttled)
@@ -4285,13 +4878,59 @@ local function HandleLogout()
 end
 
 local function HandleUIError(errMsg)
-    -- Forward pet food errors to PetFeeder module
-    HHT_PetFeeder_HandleFoodError(errMsg)
+    if errMsg and type(errMsg) == "string" and HasPet() then
+        -- Check for various pet food rejection messages
+        local isFoodRejected = string.find(errMsg, "refuse") or 
+                              string.find(errMsg, "doesn't like") or 
+                              string.find(errMsg, "does not like") or
+                              string.find(errMsg, "will not eat") or
+                              string.find(errMsg, "won't eat") or
+                              string.find(errMsg, "not high enough") or
+                              string.find(errMsg, "too low") or
+                              string.find(errMsg, "can't use that") or
+                              string.find(errMsg, "cannot use that") or
+                              string.find(errMsg, "fail to perform Feed Pet")
+        
+        if isFoodRejected and lastAttemptedFood and lastAttemptedFood.itemID then
+            local petName = UnitName("pet")
+            
+            -- Verify this error is for the same pet we tried to feed
+            if lastAttemptedFood.petName == petName then
+                HamingwaysHunterToolsDB.petFoodBlacklist = HamingwaysHunterToolsDB.petFoodBlacklist or {}
+                HamingwaysHunterToolsDB.petFoodBlacklist[petName] = HamingwaysHunterToolsDB.petFoodBlacklist[petName] or {}
+                
+                local alreadyBlacklisted = false
+                for i = 1, table.getn(HamingwaysHunterToolsDB.petFoodBlacklist[petName]) do
+                    if HamingwaysHunterToolsDB.petFoodBlacklist[petName][i] == lastAttemptedFood.itemID then
+                        alreadyBlacklisted = true
+                        break
+                    end
+                end
+                
+                if not alreadyBlacklisted then
+                    table.insert(HamingwaysHunterToolsDB.petFoodBlacklist[petName], lastAttemptedFood.itemID)
+                    DEFAULT_CHAT_FRAME:AddMessage("|cFFABD473Hamingway's HunterTools:|r " .. (lastAttemptedFood.name or "Food") .. " blacklisted for " .. petName .. " (" .. errMsg .. ")", 1, 0.5, 0)
+                    
+                    -- Clear selected food if it was blacklisted
+                    if selectedFood and selectedFood.itemID == lastAttemptedFood.itemID then
+                        selectedFood = nil
+                        if HamingwaysHunterToolsDB.selectedFood then
+                            HamingwaysHunterToolsDB.selectedFood[petName] = nil
+                        end
+                    end
+                    
+                    UpdatePetFeederDisplay()
+                end
+                
+                -- Clear the last attempted food after processing
+                lastAttemptedFood = nil
+            end
+        end
+    end
     
     if isCasting then
         isCasting = false
         if castFrame then castFrame:Hide() end
-
     end
 end
 
@@ -4324,25 +4963,25 @@ local function HandlePetEvents()
         return
     end
     
-    if HHT_PetFeedFrame then
-        if UnitExists("pet") then
+    if petFeedFrame then
+        if HasPet() then
             -- Register pet-specific events when pet becomes active
             AH:RegisterEvent("UNIT_HAPPINESS")
             AH:RegisterEvent("PET_BAR_UPDATE")
             AH:RegisterEvent("PLAYER_TARGET_CHANGED")
-            HHT_PetFeeder_UpdateDisplay(true)  -- Force update when pet state changes
+            UpdatePetFeederDisplay()
         else
             -- Unregister pet-specific events when pet is dismissed
             AH:UnregisterEvent("UNIT_HAPPINESS")
             AH:UnregisterEvent("PET_BAR_UPDATE")
             AH:UnregisterEvent("PLAYER_TARGET_CHANGED")
-            HHT_PetFeeder_UpdateDisplay(true)  -- Force update when pet disappears
+            UpdatePetFeederDisplay()
         end
     end
 end
 
 local function HandlePlayerTargetChanged()
-    if not HHT_PetFeedFrame then return end
+    if not petFeedFrame then return end
     
     -- PERFORMANCE: Direct DB access instead of GetCachedConfig()
     if not HamingwaysHunterToolsDB or not HamingwaysHunterToolsDB.autoFeedPet then
@@ -4352,15 +4991,15 @@ local function HandlePlayerTargetChanged()
     -- WORKAROUND: WoW 1.10+ requires DropItemOnUnit() to be called from a player-initiated event
     -- This is the same approach used by PetFeeder addon (see PetFeederFrame.lua line 629)
     -- Block auto-feed when player is mounted (Turtle WoW)
-    if UnitExists("pet") and not IsPlayerMounted() then
+    if HasPet() and selectedFood and not IsPlayerMounted() then
         local happiness = GetPetHappiness()
-        local hasFeedEffect = HHT_PetFeeder_HasFeedEffect()
+        local hasFeedEffect = HasFeedEffect()
         -- Only attempt feed if pet needs it and we haven't tried recently (prevent spam)
         local currentTime = GetTime()
         if (happiness == 1 or happiness == 2) and not hasFeedEffect then
-            if currentTime - HHT_PetFeedFrame.lastAutoFeedAttempt >= 2 then  -- 2 second cooldown
-                HHT_PetFeedFrame.lastAutoFeedAttempt = currentTime
-                HHT_PetFeeder_FeedPet(true)  -- silent mode (no error messages)
+            if currentTime - petFeedFrame.lastAutoFeedAttempt >= 2 then  -- 2 second cooldown
+                petFeedFrame.lastAutoFeedAttempt = currentTime
+                FeedPet(true)  -- silent mode (no error messages)
             end
         end
     end
@@ -4409,6 +5048,9 @@ local function HandleCombatLog(message)
 end
 
 AH:SetScript("OnEvent", function()
+    -- PERFORMANCE TEST: Minimal handler to isolate memory leak
+    -- Skip all processing except essential events
+    
     if event == "ADDON_LOADED" and arg1 == "HamingwaysHunterTools" then
         HandleAddonLoaded()
         return
@@ -4431,35 +5073,77 @@ AH:SetScript("OnEvent", function()
         frame = CreateUI()
     end
     
+    -- MINIMAL EVENT HANDLING - only essential events
     if event == "PLAYER_ENTERING_WORLD" then
         HandlePlayerEnteringWorld()
+        
+        -- Initialize SmartPetAction API after all functions are loaded
+        HamingwaysHunterTools_API.SmartPetAction = function()
+            if UnitExists("pet") and UnitIsDead("pet") then
+                -- Pet is dead, revive it
+                CastSpellByName("Revive Pet")
+                DEFAULT_CHAT_FRAME:AddMessage("|cFFABD473Hamingway's HunterTools:|r Reviving pet...", 0.67, 0.83, 0.45)
+                return "revive"
+            elseif UnitExists("pet") then
+                -- Pet is active - check if it's happy
+                local happiness, damagePercent, loyaltyRate = GetPetHappiness()
+                if happiness and happiness < 3 then
+                    -- Pet is not happy (1=unhappy, 2=content) - feed it
+                    if FeedPet() then
+                        return "feed"
+                    else
+                        DEFAULT_CHAT_FRAME:AddMessage("|cFFABD473Hamingway's HunterTools:|r Cannot feed (no food selected or pet cannot eat it)", WARNING_COLOR.r, WARNING_COLOR.g, WARNING_COLOR.b)
+                        return "feed_failed"
+                    end
+                else
+                    -- Pet is happy - dismiss it
+                    CastSpellByName("Dismiss Pet")
+                    DEFAULT_CHAT_FRAME:AddMessage("|cFFABD473Hamingway's HunterTools:|r Dismissing pet...", 0.67, 0.83, 0.45)
+                    return "dismiss"
+                end
+            else
+                -- No pet active, call pet
+                CastSpellByName("Call Pet")
+                DEFAULT_CHAT_FRAME:AddMessage("|cFFABD473Hamingway's HunterTools:|r Calling pet...", 0.67, 0.83, 0.45)
+                return "call"
+            end
+        end
     elseif event == "START_AUTOREPEAT_SPELL" then
         HandleAutoShotStart()
     elseif event == "STOP_AUTOREPEAT_SPELL" then
         HandleAutoShotStop()
     elseif event == "PLAYER_LOGOUT" then
         HandleLogout()
+    -- PLAYER_AURAS_CHANGED: Kept for weapon speed + pet happiness (haste buffs via OnUpdate)
     elseif event == "PLAYER_AURAS_CHANGED" then
         HandleAurasChanged()
+    -- TEST 2: Re-enable UNIT_INVENTORY_CHANGED (OK ✅)
     elseif event == "UNIT_INVENTORY_CHANGED" and arg1 == "player" then
         HandleInventoryChanged()
+    -- TEST 3: Re-enable ITEM_LOCK_CHANGED (OK ✅)
     elseif event == "ITEM_LOCK_CHANGED" then
         HandleItemLockChanged()
+    -- TEST 4: Re-enable Combat Events (OK ✅)
     elseif event == "PLAYER_REGEN_DISABLED" then
         HandleCombatStart()
     elseif event == "PLAYER_REGEN_ENABLED" then
         HandleCombatEnd()
+    -- TEST 5: Re-enable UI and Target Events (OK ✅)
     elseif event == "UI_ERROR_MESSAGE" then
         HandleUIError(arg1)
     elseif event == "PLAYER_TARGET_CHANGED" then
         HandlePlayerTargetChanged()
+    -- TEST 6: Re-enable Pet Events (with fix for GetCachedConfig leak)
     elseif event == "UNIT_PET" and arg1 == "player" then
         HandlePetEvents()
     elseif event == "UNIT_HAPPINESS" and arg1 == "pet" then
         HandlePetEvents()
+    -- Melee swing tracking (AttackBar style: both hits and misses)
     elseif event == "CHAT_MSG_COMBAT_SELF_HITS" or event == "CHAT_MSG_COMBAT_SELF_MISSES" then
         HandleCombatLog(arg1)
     end
+    
+    -- All other events still disabled
 end)
 
 

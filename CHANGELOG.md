@@ -1,5 +1,14 @@
 # Hamingway's HunterTools - Changelog
 
+## Version 1.0.3 (Feb 1, 2026)
+
+### 🔧 Bug Fixes
+- **PetFeeder Memory Leak** - Fixed memory leak in PetFeeder module through table reuse patterns
+- **Real-time Count Updates** - Food count now updates instantly when consuming items
+- **Happiness Display** - Fixed color not updating correctly with pet happiness changes
+
+---
+
 ## Version 0.8.4 - Performance Hotfix (Jan 28, 2026)
 
 ### 🔧 Critical Fixes
