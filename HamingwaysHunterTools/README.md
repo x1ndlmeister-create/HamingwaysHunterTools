@@ -1,6 +1,11 @@
 # Hamingway's HunterTools (Vanilla 1.12)
 
-## Version 1.0.2
+## Version 1.0.3
+
+### Changes in v1.0.3
+✅ PetFeeder Memory Leak Fixed (Table-Reuse Pattern)
+✅ Real-time Food Count Updates (instant feedback)
+✅ Happiness Color Display Fixed
 
 ### Changes in v0.8.1
 ✅ Hunter Class Check (Addon nur für Jäger)
