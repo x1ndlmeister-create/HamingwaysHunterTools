@@ -2,7 +2,7 @@
 
 A comprehensive, feature-rich Hunter addon for World of Warcraft Classic (1.12) that provides everything you need for optimal Hunter gameplay.
 
-![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)
+![Version](https://img.shields.io/badge/version-1.0.1-blue.svg)
 ![WoW](https://img.shields.io/badge/WoW-1.12%20Vanilla-orange.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 
