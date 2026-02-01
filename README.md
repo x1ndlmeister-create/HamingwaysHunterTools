@@ -9,11 +9,14 @@ A comprehensive, feature-rich Hunter addon for World of Warcraft Classic (1.12) 
 ## 🎯 Features
 
 ### AutoShot Timer
-- **Swing timer bar** with precise Auto Shot tracking
-- **Aiming/Cooldown phases** clearly visualized with color coding
-- **Melee swing timer** (optional)
-- **Cast bar** for Aimed Shot, Multi-Shot, etc.
+
+![Auto Shot Timer](images/autoshot-timer.png)
+
+- **Quiver-style timer** with red reload and yellow windup phases
+- **Range indicator** shows Steady Shot (green) and Short Range (red)
+- **Precise tracking** with elapsed/total time display
 - **Haste buff tracking** (Rapid Fire, Quick Shots, Berserking)
+- **Cast bar** for Aimed Shot, Multi-Shot, etc.
 - Fully customizable colors, sizes, and positions
 
 ### Pet Feeder System
