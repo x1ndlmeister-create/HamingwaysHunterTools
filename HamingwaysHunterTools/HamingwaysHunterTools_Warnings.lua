@@ -224,8 +224,9 @@ end
 local function CreateWarningFrame()
     local db = HamingwaysHunterToolsDB
     local iconSize = db.warningIconSize or DEFAULT_WARNING_ICON_SIZE
-    local frameWidth = iconSize * 2 + 14
-    local frameHeight = iconSize + 8
+    local dragPadding = 8  -- Extra padding for easier dragging
+    local frameWidth = iconSize * 2 + 14 + (dragPadding * 2)
+    local frameHeight = iconSize + 8 + (dragPadding * 2)
     
     HHT_WarningFrame = CreateFrame("Frame", "HamingwaysHunterToolsWarningFrame", UIParent)
     HHT_WarningFrame:SetWidth(frameWidth)
@@ -262,7 +263,7 @@ local function CreateWarningFrame()
     HHT_TrueshotIcon = HHT_WarningFrame:CreateTexture(nil, "ARTWORK")
     HHT_TrueshotIcon:SetWidth(iconSize)
     HHT_TrueshotIcon:SetHeight(iconSize)
-    HHT_TrueshotIcon:SetPoint("LEFT", HHT_WarningFrame, "LEFT", 4, 0)
+    HHT_TrueshotIcon:SetPoint("LEFT", HHT_WarningFrame, "LEFT", 4 + dragPadding, 0)
     HHT_TrueshotIcon:SetTexture("Interface/Icons/Ability_TrueShot")
     HHT_TrueshotIcon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
     HHT_TrueshotIcon:SetAlpha(0)  -- Start hidden, UpdateWarningDisplay will show if needed
@@ -271,7 +272,7 @@ local function CreateWarningFrame()
     local trueshotTooltip = CreateFrame("Button", nil, HHT_WarningFrame)
     trueshotTooltip:SetWidth(iconSize)
     trueshotTooltip:SetHeight(iconSize)
-    trueshotTooltip:SetPoint("LEFT", HHT_WarningFrame, "LEFT", 4, 0)
+    trueshotTooltip:SetPoint("LEFT", HHT_WarningFrame, "LEFT", 4 + dragPadding, 0)
     trueshotTooltip:EnableMouse(true)
     trueshotTooltip:RegisterForClicks("LeftButtonUp")
     
@@ -297,7 +298,7 @@ local function CreateWarningFrame()
     HHT_AspectIcon = HHT_WarningFrame:CreateTexture(nil, "ARTWORK")
     HHT_AspectIcon:SetWidth(iconSize)
     HHT_AspectIcon:SetHeight(iconSize)
-    HHT_AspectIcon:SetPoint("LEFT", HHT_WarningFrame, "LEFT", iconSize + 10, 0)
+    HHT_AspectIcon:SetPoint("LEFT", HHT_WarningFrame, "LEFT", iconSize + 10 + dragPadding, 0)
     
     -- Set texture based on main aspect
     local aspectTexture = GetAspectTexture(db.mainAspect)
@@ -309,7 +310,7 @@ local function CreateWarningFrame()
     local aspectTooltip = CreateFrame("Button", nil, HHT_WarningFrame)
     aspectTooltip:SetWidth(iconSize)
     aspectTooltip:SetHeight(iconSize)
-    aspectTooltip:SetPoint("LEFT", HHT_WarningFrame, "LEFT", iconSize + 10, 0)
+    aspectTooltip:SetPoint("LEFT", HHT_WarningFrame, "LEFT", iconSize + 10 + dragPadding, 0)
     aspectTooltip:EnableMouse(true)
     aspectTooltip:RegisterForClicks("LeftButtonUp")
     

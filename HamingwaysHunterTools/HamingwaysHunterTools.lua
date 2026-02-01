@@ -1434,8 +1434,9 @@ local function ApplyFrameSettings()
     -- Apply settings to Pet Feeder Frame
     if petFeedFrame then
         local iconSize = cfg.petFeederIconSize or DEFAULT_PET_FEEDER_ICON_SIZE
-        local frameWidth = iconSize * 2 + 9
-        local frameHeight = iconSize + 4
+        local dragPadding = 8  -- Extra padding for easier dragging
+        local frameWidth = iconSize * 2 + 9 + (dragPadding * 2)
+        local frameHeight = iconSize + 4 + (dragPadding * 2)
         
         petFeedFrame:SetWidth(frameWidth)
         petFeedFrame:SetHeight(frameHeight)
@@ -1452,13 +1453,13 @@ local function ApplyFrameSettings()
             petIconButton:SetWidth(iconSize)
             petIconButton:SetHeight(iconSize)
             petIconButton:ClearAllPoints()
-            petIconButton:SetPoint("LEFT", petFeedFrame, "LEFT", 2, 0)
+            petIconButton:SetPoint("LEFT", petFeedFrame, "LEFT", 2 + dragPadding, 0)
         end
         if foodIconButton then
             foodIconButton:SetWidth(iconSize)
             foodIconButton:SetHeight(iconSize)
             foodIconButton:ClearAllPoints()
-            foodIconButton:SetPoint("LEFT", petIconButton, "RIGHT", 5, 0)
+            petIconButton:SetPoint("LEFT", petIconButton, "RIGHT", 5, 0)
         end
     end
     
@@ -4340,8 +4341,9 @@ end
 local function CreatePetFeederFrame()
     local cfg = GetConfig()
     local iconSize = cfg.petFeederIconSize or DEFAULT_PET_FEEDER_ICON_SIZE
-    local frameWidth = iconSize * 2 + 9
-    local frameHeight = iconSize + 4
+    local dragPadding = 8  -- Extra padding for easier dragging
+    local frameWidth = iconSize * 2 + 9 + (dragPadding * 2)
+    local frameHeight = iconSize + 4 + (dragPadding * 2)
     
     petFeedFrame = CreateFrame("Frame", "HamingwaysHunterToolsPetFeederFrame", UIParent)
     petFeedFrame:SetWidth(frameWidth)
@@ -4378,7 +4380,7 @@ local function CreatePetFeederFrame()
     petIconButton = CreateFrame("Button", nil, petFeedFrame)
     petIconButton:SetWidth(iconSize)
     petIconButton:SetHeight(iconSize)
-    petIconButton:SetPoint("LEFT", petFeedFrame, "LEFT", 2, 0)
+    petIconButton:SetPoint("LEFT", petFeedFrame, "LEFT", 2 + dragPadding, 0)
     
     petIconButton.icon = petIconButton:CreateTexture(nil, "BACKGROUND")
     petIconButton.icon:SetAllPoints()
