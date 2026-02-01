@@ -13,7 +13,7 @@ A comprehensive, feature-rich Hunter addon for World of Warcraft Classic (1.12) 
 ![Auto Shot Timer](images/autoshot-timer.png)
 
 - **Auto Shot Timer** with red reload and yellow windup phases
-- **Range indicator** shows Steady Shot (green) and Short Range (red)
+- **Range indicator** shows long range, short range, dead zone
 - **Precise tracking** with elapsed/total time display
 - **Haste buff tracking** (Rapid Fire, Quick Shots, Berserking)
 - **Cast bar** for Aimed Shot, Multi-Shot, etc.
