@@ -1,6 +1,12 @@
 # Hamingway's HunterTools (Vanilla 1.12)
 
-## Version 1.0.3
+## Version 1.0.4
+
+### Changes in v1.0.4
+✅ Added `NotifyCastAuto()` API for user macros
+✅ Simplified cast notification (auto-calculates cast time from spell database)
+✅ Usage: `/script HamingwaysHunterTools_API.NotifyCastAuto("Multi-Shot")` in macros
+✅ Enables castbar display for instant casts without LazyHunt
 
 ### Changes in v1.0.3
 ✅ PetFeeder Memory Leak Fixed (Table-Reuse Pattern)
@@ -45,6 +51,23 @@
   - Text-only indicators (no exact yards - Vanilla limitation)
   - Dead Zone blinks as warning
 - Commands: `/HamingwaysHunterTools reset` — reset settings
+
+## API for Macros (v1.0.4+)
+Users can add castbar display to any spell using macros:
+
+**Multi-Shot Macro:**
+```
+/cast Multi-Shot
+/script HamingwaysHunterTools_API.NotifyCastAuto("Multi-Shot")
+```
+
+**Aimed Shot Macro:**
+```
+/cast Aimed Shot
+/script HamingwaysHunterTools_API.NotifyCastAuto("Aimed Shot")
+```
+
+The API automatically calculates cast time based on the spell database and current haste. Works for all spells in `castSpells` table (Aimed Shot, Multi-Shot, Steady Shot, etc.).
 
 ## Technical Notes
 - Saved variables: `SavedVariablesPerCharacter: HamingwaysHunterToolsDB`

@@ -3,7 +3,7 @@
 -- Autoshot timer matching Quiver's design: red reload, yellow windup
 
 -- Version: x.y.z (x=release 0-9, y=feature 0-999, z=build 0-9999)
-local VERSION = "1.0.3"  -- Fix: Small memory leak fixes in PetFeeder
+local VERSION = "1.0.4"  -- Feature: Added NotifyCastAuto API for user macros
 
 local AH = CreateFrame("Frame", "HamingwaysHunterToolsCore")
 
@@ -160,6 +160,20 @@ local function InitAPI()
                 frame:Show()
             end
         end
+    end
+    
+    -- Simplified API: Auto-calculate cast time from spell database (for user macros)
+    -- Usage: /script HamingwaysHunterTools_API.NotifyCastAuto("Multi-Shot")
+    HamingwaysHunterTools_API.NotifyCastAuto = function(spellName)
+        if not spellName or not castSpells[spellName] then 
+            return false 
+        end
+        local castTime = CalcCastTime(spellName)
+        if castTime and castTime > 0 then
+            StartCast(spellName, castTime)
+            return true
+        end
+        return false
     end
     
     -- Smart Pet Management: Combines feed/dismiss/call/revive based on pet state
