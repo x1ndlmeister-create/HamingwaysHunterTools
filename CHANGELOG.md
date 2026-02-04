@@ -1,5 +1,24 @@
 # Hamingway's HunterTools - Changelog
 
+## Version 1.0.5 (Feb 4, 2026)
+
+### 🔧 Bug Fixes
+- **Fixed NotifyCastAuto API Error** - Changed `castSpells` from local to global table (`HHT_castSpells`) to prevent "attempt to index global 'castSpells' (a nil value)" error when API is called from macros
+- **Instant Cast Support** - Fixed Multi-Shot and other instant casts not working with `NotifyCastAuto` API (changed condition from `castTime > 0` to `castTime >= 0`)
+
+### 📝 Technical Details
+The issue occurred when macros called the API before addon initialization completed. Making the spell database globally accessible ensures it's always available when needed.
+
+---
+
+## Version 1.0.4 (Feb 2, 2026)
+
+### ✨ New Features
+- **NotifyCastAuto API** - Simplified API for user macros that auto-calculates cast times from spell database
+- **Smart Pet Action API** - One-click pet management: Feed/Dismiss/Call/Revive based on pet state
+
+---
+
 ## Version 1.0.3 (Feb 1, 2026)
 
 ### 🔧 Bug Fixes

@@ -3,7 +3,7 @@
 -- Autoshot timer matching Quiver's design: red reload, yellow windup
 
 -- Version: x.y.z (x=release 0-9, y=feature 0-999, z=build 0-9999)
-local VERSION = "1.0.4"  -- Feature: Added NotifyCastAuto API for user macros
+local VERSION = "1.0.5"  -- Bugfix: Fixed NotifyCastAuto API castSpells nil error
 
 local AH = CreateFrame("Frame", "HamingwaysHunterToolsCore")
 
@@ -163,16 +163,9 @@ local function InitAPI()
     end
     
     -- Simplified API: Auto-calculate cast time from spell database (for user macros)
-    -- Usage: /script HamingwaysHunterTools_API.NotifyCastAuto("Multi-Shot")
+    -- NOTE: This function will be properly initialized after addon loads (see HandleAddonLoaded)
     HamingwaysHunterTools_API.NotifyCastAuto = function(spellName)
-        if not spellName or not castSpells[spellName] then 
-            return false 
-        end
-        local castTime = CalcCastTime(spellName)
-        if castTime and castTime > 0 then
-            StartCast(spellName, castTime)
-            return true
-        end
+        DEFAULT_CHAT_FRAME:AddMessage("|cFFABD473Hamingway's HunterTools:|r NotifyCastAuto not yet initialized", 1, 0, 0)
         return false
     end
     
@@ -260,7 +253,8 @@ local WARNING_COLOR = {r=1, g=0.5, b=0}  -- Orange for warnings/errors
 
 -- Spell cast database for Castbar (like Quiver)
 -- Time in ms, Offset in ms, Haste="range" means affected by ranged haste
-local castSpells = {
+-- NOTE: Global table to ensure it's accessible from API functions initialized at load time
+HHT_castSpells = {
     ["Aimed Shot"] = { Time=3000, Offset=500, Haste="range" },
     ["Gezielter Schuss"] = { Time=3000, Offset=500, Haste="range" },
     ["Multi-Shot"] = { Time=0, Offset=500, Haste="range" },
@@ -380,7 +374,7 @@ end
 
 -- Calculate cast time with haste (like Quiver)
 local function CalcCastTime(spellName)
-    local meta = castSpells[spellName]
+    local meta = HHT_castSpells[spellName]
     if not meta then return nil end
     
     if meta.Haste == "range" then
@@ -392,6 +386,21 @@ local function CalcCastTime(spellName)
     else
         -- No haste
         return (meta.Offset + meta.Time) / 1000
+    end
+end
+
+-- Initialize NotifyCastAuto API now that CalcCastTime and StartCast are defined
+local function InitNotifyCastAutoAPI()
+    HamingwaysHunterTools_API.NotifyCastAuto = function(spellName)
+        if not spellName or not HHT_castSpells[spellName] then 
+            return false 
+        end
+        local castTime = CalcCastTime(spellName)
+        if castTime and castTime >= 0 then  -- Changed: Allow instant casts (castTime = 0)
+            StartCast(spellName, castTime)
+            return true
+        end
+        return false
     end
 end
 
@@ -553,7 +562,7 @@ local function FindSpellByTexture(texture)
         local name = GetSpellName(i, BOOKTYPE_SPELL)
         if not name then return nil end
         local spellTexture = GetSpellTexture(i, BOOKTYPE_SPELL)
-        if spellTexture == texture and castSpells[name] then
+        if spellTexture == texture and HHT_castSpells[name] then
             return name
         end
         i = i + 1
@@ -562,7 +571,7 @@ end
 
 -- Handle cast attempt (validates cast is actually happening)
 local function HandleCastAttempt(spellName, isCurrentAction)
-    if not spellName or not castSpells[spellName] then return end
+    if not spellName or not HHT_castSpells[spellName] then return end
     
     local castTime = CalcCastTime(spellName)
     if not castTime or castTime <= 0 then return end
@@ -4182,6 +4191,9 @@ local function HandleAddonLoaded()
     UpdateAurasEventRegistration()
     if statsFrame then UpdateStatsDisplay() end
     if HHT_PetFeedFrame then HHT_PetFeeder_UpdateDisplay() end
+    
+    -- Initialize NotifyCastAuto API after addon is fully loaded
+    InitNotifyCastAutoAPI()
 end
 
 local function HandlePlayerEnteringWorld()
