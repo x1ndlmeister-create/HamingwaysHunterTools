@@ -3,7 +3,7 @@
 -- Autoshot timer matching Quiver's design: red reload, yellow windup
 
 -- Version: x.y.z (x=release 0-9, y=feature 0-999, z=build 0-9999)
-local VERSION = "1.0.5"  -- Bugfix: Fixed NotifyCastAuto API castSpells nil error
+local VERSION = "1.0.6"  -- Bugfix: Fixed stats frame drag crash
 
 local AH = CreateFrame("Frame", "HamingwaysHunterToolsCore")
 
@@ -867,20 +867,30 @@ end
 
 -- Make frame draggable with position saving
 local function MakeDraggable(frame, dbKeyPrefix)
-    frame:SetScript("OnDragStart", function()
-        local cfg = GetCachedConfig()
-        if not cfg.locked then
-            this:StartMoving()
-        end
-    end)
-    frame:SetScript("OnDragStop", function()
-        this:StopMovingOrSizing()
-        local point, _, _, xOfs, yOfs = this:GetPoint()
-        HamingwaysHunterToolsDB = HamingwaysHunterToolsDB or {}
-        HamingwaysHunterToolsDB[dbKeyPrefix .. "Point"] = point
-        HamingwaysHunterToolsDB[dbKeyPrefix .. "X"] = xOfs
-        HamingwaysHunterToolsDB[dbKeyPrefix .. "Y"] = yOfs
-    end)
+    -- Only set scripts if not already set (prevent multiple registrations)
+    if not frame.draggableInitialized then
+        frame:SetScript("OnDragStart", function()
+            if not this or not this:IsVisible() then return end
+            local cfg = GetCachedConfig()
+            if not cfg.locked then
+                this:StartMoving()
+            end
+        end)
+        frame:SetScript("OnDragStop", function()
+            if not this or not this:IsVisible() then return end
+            this:StopMovingOrSizing()
+            
+            -- Safely get position with error handling
+            local point, _, _, xOfs, yOfs = this:GetPoint()
+            if point and xOfs and yOfs then
+                HamingwaysHunterToolsDB = HamingwaysHunterToolsDB or {}
+                HamingwaysHunterToolsDB[dbKeyPrefix .. "Point"] = point
+                HamingwaysHunterToolsDB[dbKeyPrefix .. "X"] = xOfs
+                HamingwaysHunterToolsDB[dbKeyPrefix .. "Y"] = yOfs
+            end
+        end)
+        frame.draggableInitialized = true
+    end
 end
 
 -- Show tooltip with title and optional lines

@@ -1,5 +1,13 @@
 # Hamingway's HunterTools - Changelog
 
+## Version 1.0.6 (Feb 4, 2026)
+
+### 🔧 Bug Fixes
+- **Fixed Stats Frame Crash** - Prevented game crash when dragging statistics window multiple times by adding safety checks and preventing duplicate event handler registrations
+- **Enhanced Drag Safety** - Added frame visibility checks and GetPoint() validation in MakeDraggable function
+
+---
+
 ## Version 1.0.5 (Feb 4, 2026)
 
 ### 🔧 Bug Fixes
