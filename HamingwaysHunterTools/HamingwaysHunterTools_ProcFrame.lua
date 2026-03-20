@@ -47,6 +47,7 @@ local ProcState = {
     lastScan    = 0,
     UPDATE_INTERVAL = 0.05,
     SCAN_THROTTLE   = 0.1,
+    pendingRescan   = false,  -- force scan on next frame after UNIT_BUFF
 }
 
 -- ============ Buff Detection Constants ============
@@ -526,6 +527,15 @@ ProcModule:SetScript("OnUpdate", function()
     if now - ProcState.lastUpdate < ProcState.UPDATE_INTERVAL then return end
     ProcState.lastUpdate = now
 
+    -- Deferred rescan: UNIT_BUFF fires before buff list updates in 1.12,
+    -- so we scan again on the next frame to catch procs missed by the event scan
+    if ProcState.pendingRescan then
+        ProcState.pendingRescan = false
+        ScanProcs(true)
+        HHT_UpdateProcDisplay()
+        return
+    end
+
     ScanProcs()  -- throttled internally; keeps state current without relying on events
     HHT_UpdateProcDisplay()
 end)
@@ -538,9 +548,12 @@ ProcModule:SetScript("OnEvent", function()
 
     elseif event == "UNIT_BUFF" or event == "UNIT_DEBUFF" then
         -- arg1 == "player" means player's auras changed; scan immediately (no throttle)
+        -- UNIT_BUFF fires before buff list updates in 1.12, so also set pendingRescan
+        -- to catch procs on the very next frame
         if arg1 == "player" then
             ScanProcs(true)
             HHT_UpdateProcDisplay()
+            ProcState.pendingRescan = true
         end
 
     elseif event == "PLAYER_ENTERING_WORLD" then
