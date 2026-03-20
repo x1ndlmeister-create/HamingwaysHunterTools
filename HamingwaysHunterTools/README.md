@@ -14,7 +14,7 @@
 ### Proc Frame *(requires SuperWoW)*
 Tracks active hunter procs from Turtle WoW 1.18.1 talents and displays them as moveable icons with timers.
 
-![Proc Frame](images/procframe.png)
+![Proc Frame](images/proc-frame.png)
 
 **Lock and Load** — Shows remaining duration. When active, LazyHunt automatically replaces Steady Shot with Aimed Shot (1s cast with LnL).
 
