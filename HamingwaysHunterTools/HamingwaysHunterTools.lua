@@ -1,0 +1,4173 @@
+
+-- HamingwaysHunterTools - Vanilla 1.12
+-- Autoshot timer matching Quiver's design: red reload, yellow windup
+
+-- Version: x.y.z (x=release 0-9, y=feature 0-999, z=build 0-9999)
+local VERSION = "1.1.0"  -- Feature: Proc Frame (Lock and Load, Experimental Ammunition)
+
+local AH = CreateFrame("Frame", "HamingwaysHunterToolsCore")
+
+-- SavedVariables (per character): HamingwaysHunterToolsDB
+-- Structure: { x, y, point, minimapPos, locked, frameWidth, frameHeight, borderSize, castbarSpacing }
+
+-- Main frame and bar elements moved to HamingwaysHunterTools_AutoShotTimer.lua module
+-- Access via HHT_AutoShot_GetFrame() if needed
+
+local minimapButton = nil
+local configFrame = nil
+local ammoFrame = nil
+local ammoMenuFrame = nil
+local statsFrame = nil
+
+-- ============ Stats tracking variables (global for cross-module access) ============
+-- Reaction time tracking (delay between auto-shot and cast start)
+reactionTimes = {}
+MAX_REACTION_SAMPLES = 20  -- Keep last 20 reactions
+lastAutoShotTime = 0  -- Track when auto-shot hit for reaction time stats
+
+-- Skipped auto-shots tracking
+lastCastTime = 0
+autoShotBetweenCasts = false
+skippedAutoShots = 0
+totalCastSequences = 0
+
+-- Delayed auto-shots tracking (yellow bar reset by cast)
+delayedAutoShotTimes = {}
+MAX_DELAYED_SAMPLES = 20
+statsNeedReset = false  -- Flag to reset stats on next combat start
+
+-- Performance: Throttle expensive operations
+local lastRangeCheck = 0
+local cachedRangeText = nil
+local cachedIsDeadZone = false
+local lastTimerModeCheck = 0
+local RANGE_CHECK_INTERVAL = 0.2  -- Check range every 0.2s (5x/sec - smooth enough)
+local TIMER_MODE_INTERVAL = 0.5   -- Check timer mode every 0.5s
+
+-- ============ Shared Core State (accessed by modules) ============
+HHT_Core = {
+    isCasting = false,
+    previewMode = false,
+    lastCastEndTime = 0,
+    CheckSpellInRange = nil,  -- Will be initialized later
+    GetBaseWeaponSpeed = nil,  -- Will be initialized later
+}
+
+-- Haste buff tracker elements
+local hasteFrame = nil
+local hasteIcons = {}
+local MAX_HASTE_ICONS = 8
+local buffTimestamps = {}  -- Track when buffs were applied
+local maxBuffDurations = {}  -- Track maximum duration seen for each buff (by texture)
+local activeBuffs = {}  -- Cached active buffs with remaining time
+local activeBuffCount = 0
+
+-- ============ Global variables for module access ============
+-- Debug flag (global for castbar module)
+HHT_DEBUG = false
+
+-- Player GUID for UNIT_CASTEVENT filtering (SuperWoW) - global for castbar module
+PLAYER_GUID = nil
+local lastSpellCastTime = 0  -- Track when we last cast a spell (for filtering ITEM_LOCK_CHANGED)
+
+-- Turtle WoW: Observed spell IDs (for reference)
+-- [75] = Auto Shot (detected via UNIT_CASTEVENT on SuperWoW)
+-- [3668] = Steady Shot (custom Turtle WoW spell)
+-- [51551] = Quick Shots buff proc (triggers CAST event when buff is applied, not an actual cast)
+
+-- Buff procs that trigger CAST events but aren't actual casts (filter from debug spam) - global for castbar module
+BUFF_PROC_SPELLS = {
+    [51551] = true,  -- Quick Shots buff proc
+}
+
+-- Known spell names for debug output (SuperWoW auto-learns new spells via SpellInfo + cache) - global for castbar module
+KNOWN_SPELL_NAMES = {
+    [75] = "Auto Shot",
+    [51551] = "Quick Shots",
+    -- SuperWoW will auto-detect and cache all other spells (Steady Shot, Multi-Shot ranks, Aimed Shot ranks, Arcane Shot ranks, etc.)
+}
+
+-- ============ SuperWoW Detection (One-time check at load) ============
+HAS_SUPERWOW = false
+local SUPERWOW_AutoShotAPI = nil
+local SUPERWOW_BuffAPI = nil
+local SUPERWOW_AVAILABLE = false  -- Hardware detection (actual APIs present)
+
+local function DetectSuperWoW()
+    -- Check for SuperWoW specific APIs (Balake's version)
+    
+    -- Priority 1: Check for GetPlayerBuffID (most reliable)
+    if GetPlayerBuffID then
+        SUPERWOW_AVAILABLE = true
+        SUPERWOW_BuffAPI = "GetPlayerBuffID"
+    end
+    
+    -- Priority 2: Check for GetPlayerBuffTimeLeft (fallback)
+    if GetPlayerBuffTimeLeft then
+        SUPERWOW_AVAILABLE = true
+        if not SUPERWOW_BuffAPI then
+            SUPERWOW_BuffAPI = "GetPlayerBuffTimeLeft"
+        end
+    end
+    
+    -- Priority 3: Check for SUPERWOW_VERSION or SUPERWOW_STRING
+    if SUPERWOW_VERSION or SUPERWOW_STRING then
+        SUPERWOW_AVAILABLE = true
+    end
+    
+    -- NOTE: UNIT_CASTEVENT does NOT support Auto-Shot detection
+    -- Per SuperWoW API: event types are "START", "CAST", "FAIL", "CHANNEL", "MAINHAND", "OFFHAND"
+    -- No "RANGED" type exists - Auto-Shot is not tracked by this event
+    -- We use Vanilla ITEM_LOCK_CHANGED for reliable Auto-Shot detection on all clients
+    
+    -- Apply mode override from config
+    local forceMode = HamingwaysHunterToolsDB and HamingwaysHunterToolsDB.forceMode or "auto"
+    if forceMode == "superwow" then
+        HAS_SUPERWOW = SUPERWOW_AVAILABLE  -- Can only force SuperWoW if APIs exist
+    elseif forceMode == "vanilla" then
+        HAS_SUPERWOW = false  -- Force Vanilla mode even if SuperWoW present
+    else  -- "auto"
+        HAS_SUPERWOW = SUPERWOW_AVAILABLE
+    end
+    
+    if HAS_SUPERWOW then
+        local features = {}
+        if SUPERWOW_BuffAPI then
+            table.insert(features, "Buffs: " .. SUPERWOW_BuffAPI)
+        end
+        
+        local modeText = forceMode == "superwow" and " (Forced)" or ""
+        if table.getn(features) > 0 then
+            DEFAULT_CHAT_FRAME:AddMessage("|cFFABD473Hamingway's HunterTools:|r SuperWoW mode enabled" .. modeText, 0.67, 0.83, 0.45)
+            for i = 1, table.getn(features) do
+                DEFAULT_CHAT_FRAME:AddMessage("  |cFFFFFFFF" .. features[i] .. "|r", 0.8, 0.8, 0.8)
+            end
+            DEFAULT_CHAT_FRAME:AddMessage("  |cFFFFFFFFAuto-Shot: UNIT_CASTEVENT filtering (improved accuracy)|r", 0.8, 0.8, 0.8)
+        else
+            DEFAULT_CHAT_FRAME:AddMessage("|cFFABD473Hamingway's HunterTools:|r SuperWoW mode enabled (limited features)" .. modeText, 0.8, 0.8, 0.8)
+        end
+        
+        -- Note: UNIT_CASTEVENT registered dynamically during shooting for performance
+    else
+        local modeText = forceMode == "vanilla" and " (Forced)" or ""
+        DEFAULT_CHAT_FRAME:AddMessage("|cFFABD473Hamingway's HunterTools:|r Vanilla 1.12 mode" .. modeText, 0.8, 0.8, 0.8)
+    end
+end
+
+-- Set mode at runtime (for testing)
+local function SetMode(mode)
+    if not mode or (mode ~= "auto" and mode ~= "vanilla" and mode ~= "superwow") then
+        return false, "Invalid mode. Use: auto, vanilla, or superwow"
+    end
+    
+    HamingwaysHunterToolsDB.forceMode = mode
+    
+    -- Store old mode for event re-registration
+    local oldMode = HAS_SUPERWOW
+    
+    -- Apply new mode
+    if mode == "superwow" then
+        if not SUPERWOW_AVAILABLE then
+            return false, "SuperWoW APIs not available on this client"
+        end
+        HAS_SUPERWOW = true
+    elseif mode == "vanilla" then
+        HAS_SUPERWOW = false
+    else  -- "auto"
+        HAS_SUPERWOW = SUPERWOW_AVAILABLE
+    end
+    
+    -- Re-register events if mode changed and currently shooting
+    if oldMode ~= HAS_SUPERWOW then
+        local state = HHT_AutoShot_GetState()
+        if state and state.isShooting then
+            -- Unregister old mode events
+            if oldMode then
+                -- Was SuperWoW, switching to Vanilla
+                if PLAYER_GUID then
+                    AH:UnregisterEvent("UNIT_CASTEVENT")
+                end
+            else
+                -- Was Vanilla, switching to SuperWoW
+                AH:UnregisterEvent("ITEM_LOCK_CHANGED")
+            end
+            
+            -- Register new mode events
+            if HAS_SUPERWOW then
+                -- Switching to SuperWoW
+                if PLAYER_GUID then
+                    AH:RegisterEvent("UNIT_CASTEVENT")
+                end
+            else
+                -- Switching to Vanilla
+                AH:RegisterEvent("ITEM_LOCK_CHANGED")
+            end
+        end
+    end
+    
+    -- Show mode change message
+    local modeColor = HAS_SUPERWOW and "|cFF00FF00" or "|cFFFFFF00"
+    local modeName = HAS_SUPERWOW and "SuperWoW" or "Vanilla"
+    DEFAULT_CHAT_FRAME:AddMessage("|cFFABD473Hamingway's HunterTools:|r Mode changed to " .. modeColor .. modeName .. "|r (" .. mode .. ")", 0.67, 0.83, 0.45)
+    
+    if not SUPERWOW_AVAILABLE and mode == "superwow" then
+        DEFAULT_CHAT_FRAME:AddMessage("  |cFFFF6666Warning: SuperWoW APIs not detected, staying in Vanilla mode|r", 1, 0.4, 0.4)
+    end
+    
+    return true, "Mode set to: " .. mode
+end
+
+-- ============ Timer State (now in AutoShotTimer module) ============
+-- AutoShot state is accessed via HHT_AutoShot_State global
+local AIMING_TIME = 0.5  -- 0.5s like Quiver (not 0.65)
+
+-- Global API for other addons (like LazyHunt) to access timer state
+HamingwaysHunterTools_API = {}
+
+-- Initialize API functions (needs to be after local variables are defined)
+local function InitAPI()
+    HamingwaysHunterTools_API.IsReloading = function()
+        local state = HHT_AutoShot_GetState()
+        return state and state.isReloading or false
+    end
+    HamingwaysHunterTools_API.IsShooting = function()
+        local state = HHT_AutoShot_GetState()
+        return state and state.isShooting or false
+    end
+    HamingwaysHunterTools_API.IsCasting = function() return HHT_Core.isCasting end
+    HamingwaysHunterTools_API.GetLastShotTime = function()
+        local state = HHT_AutoShot_GetState()
+        return state and state.lastAutoFired or 0
+    end
+    HamingwaysHunterTools_API.GetWeaponSpeed = function()
+        local state = HHT_AutoShot_GetState()
+        return state and state.weaponSpeed or 2.0
+    end
+    HamingwaysHunterTools_API.GetBaseWeaponSpeed = function()
+        local state = HHT_AutoShot_GetState()
+        return state and state.baseWeaponSpeed or 2.0
+    end
+    HamingwaysHunterTools_API.GetHasteMultiplier = function()
+        local state = HHT_AutoShot_GetState()
+        return state and state.hasteMultiplier or 1.0
+    end
+    HamingwaysHunterTools_API.GetAimingTime = function() return AIMING_TIME end
+    HamingwaysHunterTools_API.IsInRedPhase = function()
+        -- Red phase = Same logic as red bar display
+        local state = HHT_AutoShot_GetState()
+        return state and state.isShooting and state.isReloading
+    end
+    HamingwaysHunterTools_API.IsInYellowPhase = function()
+        -- Yellow phase = Same logic as yellow bar display
+        local state = HHT_AutoShot_GetState()
+        return state and state.isShooting and not state.isReloading
+    end
+    -- Notify about external casts (from LazyHunt) - used for instant casts like Multi-Shot
+    HamingwaysHunterTools_API.NotifyCast = function(spellName, castTime)
+        -- SuperWoW: Skip NotifyCast - we use UNIT_CASTEVENT instead (more accurate)
+        if HAS_SUPERWOW and PLAYER_GUID then
+            return
+        end
+        
+        -- Vanilla: Use castbar module
+        HHT_Castbar_StartCast(spellName, castTime)
+    end
+    
+    -- Simplified API: Auto-calculate cast time from spell database (for user macros)
+    -- NOTE: This function will be properly initialized after addon loads (see HandleAddonLoaded)
+    HamingwaysHunterTools_API.NotifyCastAuto = function(spellName)
+        DEFAULT_CHAT_FRAME:AddMessage("|cFFABD473Hamingway's HunterTools:|r NotifyCastAuto not yet initialized", 1, 0, 0)
+        return false
+    end
+    
+    -- Smart Pet Management: Combines feed/dismiss/call/revive based on pet state
+    -- Pet unhappy → Feed with selected food
+    -- Pet happy → Dismiss pet
+    -- No active pet → Call pet
+    -- Pet dead → Revive pet
+    -- NOTE: This function will be properly initialized after addon loads (see PLAYER_ENTERING_WORLD)
+    HamingwaysHunterTools_API.SmartPetAction = function()
+        DEFAULT_CHAT_FRAME:AddMessage("|cFFABD473Hamingway's HunterTools:|r SmartPetAction not yet initialized", 1, 0, 0)
+        return "not_initialized"
+    end
+end
+
+-- Init API immediately (closure will access variables at runtime)
+InitAPI()
+
+-- MEMORY LEAK FIX: Initialize SmartPetAction once at load time (not on every event)
+HamingwaysHunterTools_API.SmartPetAction = function()
+    if UnitExists("pet") and UnitIsDead("pet") then
+        CastSpellByName("Revive Pet")
+        DEFAULT_CHAT_FRAME:AddMessage("|cFFABD473Hamingway's HunterTools:|r Reviving pet...", 0.67, 0.83, 0.45)
+        return "revive"
+    elseif UnitExists("pet") then
+        local happiness, damagePercent, loyaltyRate = GetPetHappiness()
+        if happiness and happiness < 3 then
+            if HHT_PetFeeder_FeedPet() then
+                return "feed"
+            else
+                DEFAULT_CHAT_FRAME:AddMessage("|cFFABD473Hamingway's HunterTools:|r Cannot feed (no food selected or pet cannot eat it)", WARNING_COLOR.r, WARNING_COLOR.g, WARNING_COLOR.b)
+                return "feed_failed"
+            end
+        else
+            CastSpellByName("Dismiss Pet")
+            DEFAULT_CHAT_FRAME:AddMessage("|cFFABD473Hamingway's HunterTools:|r Dismissing pet...", 0.67, 0.83, 0.45)
+            return "dismiss"
+        end
+    else
+        CastSpellByName("Call Pet")
+        DEFAULT_CHAT_FRAME:AddMessage("|cFFABD473Hamingway's HunterTools:|r Calling pet...", 0.67, 0.83, 0.45)
+        return "call"
+    end
+end
+
+-- Default config values
+local DEFAULT_FRAME_WIDTH = 240
+local DEFAULT_FRAME_HEIGHT = 14
+local DEFAULT_BORDER_SIZE = 10
+local DEFAULT_CASTBAR_SPACING = 2
+local DEFAULT_ICON_SIZE = 24
+local DEFAULT_AMMO_ICON_SIZE = 32
+local DEFAULT_PET_FEEDER_ICON_SIZE = 32
+local DEFAULT_STATS_FONT_SIZE = 12
+local DEFAULT_SHOW_ONLY_IN_COMBAT = false
+local DEFAULT_RELOAD_COLOR = {r=1, g=0, b=0}
+local DEFAULT_AIMING_COLOR = {r=1, g=1, b=0}
+local DEFAULT_CAST_COLOR = {r=0.5, g=0.5, b=1}
+local DEFAULT_BG_COLOR = {r=0, g=0, b=0}
+local DEFAULT_BG_OPACITY = 0.8
+local DEFAULT_MELEE_COLOR = {r=1, g=0.5, b=0}  -- Orange for melee swings
+
+-- Melee Timer Defaults
+local DEFAULT_SHOW_MELEE_TIMER = false
+local DEFAULT_MELEE_ONLY_IN_COMBAT = true
+local DEFAULT_MELEE_INSTEAD_OF_AUTOSHOT = false
+local DEFAULT_AUTO_SWITCH_MELEE_RANGED = true
+local PLAYER_BUFF_START_ID = 0  -- Vanilla 1.12 player buff offset
+
+-- Visual constants
+local BAR_ALPHA = 0.8  -- Opacity for bar elements
+local MAX_BUFF_SLOTS = 31  -- Vanilla 1.12 max buff slots (0-31)
+local INACTIVE_COLOR_GRAY = 0.3  -- Gray color for inactive/unknown states
+local CONTENT_COLOR_ORANGE = 0.6  -- Orange component for "content" happiness
+local UNHAPPY_COLOR_RED = 0.8  -- Red for unhappy pet
+local HAPPY_COLOR_GREEN = 0.6  -- Green for happy pet
+local WARNING_COLOR = {r=1, g=0.5, b=0}  -- Orange for warnings/errors
+
+-- Spell cast database for Castbar (like Quiver)
+-- Time in ms, Offset in ms, Haste="range" means affected by ranged haste
+-- NOTE: Global table to ensure it's accessible from API functions initialized at load time
+HHT_castSpells = {
+    ["Aimed Shot"] = { Time=3000, Offset=500, Haste="range" },
+    ["Gezielter Schuss"] = { Time=3000, Offset=500, Haste="range" },
+    ["Multi-Shot"] = { Time=0, Offset=500, Haste="range" },
+    ["Mehrfachschuss"] = { Time=0, Offset=500, Haste="range" },
+    ["Steady Shot"] = { Time=1000, Offset=500, Haste="range" },
+    ["Stetiger Schuss"] = { Time=1000, Offset=500, Haste="range" },
+    ["Trueshot"] = { Time=1000, Offset=0, Haste="none" },
+    ["Dismiss Pet"] = { Time=5000, Offset=0, Haste="none" },
+    ["Begleiter entlassen"] = { Time=5000, Offset=0, Haste="none" },
+    ["Revive Pet"] = { Time=10000, Offset=0, Haste="none" },
+    ["Tier wiederbeleben"] = { Time=10000, Offset=0, Haste="none" },
+}
+
+-- Ammo database (Item IDs) - 10000x faster than tooltip scanning!
+local AMMO_IDS = {
+    -- Arrows
+    2512, -- Rough Arrow
+    2515, -- Sharp Arrow
+    3030, -- Razor Arrow
+    3031, -- Wicked Arrow (Horde)
+    11285, -- Jagged Arrow
+    28053, -- Wicked Arrow (TBC/Turtle)
+    18042, -- Thorium Headed Arrow
+    12654, -- Doomshot
+    19316, -- Ice Threaded Arrow
+    
+    -- Bullets
+    2516, -- Light Shot
+    2519, -- Heavy Shot
+    3033, -- Solid Shot
+    11284, -- Accurate Slugs
+    28060, -- Impact Shot (TBC/Turtle)
+    5568, -- Smooth Pebble (Sling)
+    13377, -- Miniature Cannon Balls
+    
+    -- Special (Turtle WoW / Custom)
+    19317, -- Silithid Barb
+    23773, -- Fel Iron Shells (TBC)
+    23772, -- Fel Iron Arrow (TBC)
+}
+
+-- Quick lookup table for ammo (faster than iterating array)
+local AMMO_LOOKUP = {}
+for _, itemID in ipairs(AMMO_IDS) do
+    AMMO_LOOKUP[itemID] = true
+end
+
+-- Known haste buffs (TEXTURE-BASED for 10000x faster detection - no tooltip scans!)
+-- Using texture paths as keys allows instant comparison without tooltip parsing
+-- Note: GetPlayerBuffTexture() returns path WITH "Interface\\Icons\\" prefix in Vanilla
+local hasteBuffsByTexture = {
+    ["Interface\\Icons\\Ability_Hunter_RunningShot"] = {name="Rapid Fire", duration=15, texture="Interface\\Icons\\Ability_Hunter_RunningShot"},
+    ["Interface\\Icons\\Ability_Warrior_InnerRage"] = {name="Quick Shots", duration=12, texture="Interface\\Icons\\Ability_Warrior_InnerRage"},
+    ["Interface\\Icons\\Racial_Troll_Berserk"] = {name="Berserking", duration=10, texture="Interface\\Icons\\Racial_Troll_Berserk"},
+    ["Interface\\Icons\\INV_Misc_Head_Dragon_Red"] = {name="Essence of the Red", duration=20, texture="Interface\\Icons\\INV_Misc_Head_Dragon_Red"},
+    ["Interface\\Icons\\INV_Misc_MonsterSpiderCarapace_01"] = {name="Kiss of the Spider", duration=15, texture="Interface\\Icons\\INV_Misc_MonsterSpiderCarapace_01"},
+    ["Interface\\Icons\\Spell_Nature_Invisibilty"] = {name="Potion of Quickness", duration=30, texture="Interface\\Icons\\Spell_Nature_Invisibilty"},  -- Turtle WoW
+    ["Interface\\Icons\\Spell_Nature_EarthBind"] = {name="Swiftness", duration=15, texture="Interface\\Icons\\Spell_Nature_EarthBind"},
+    -- Note: Juju Flurry removed - shares texture with Juju Might (AP buff). Need tooltip scan or different detection method.
+}
+
+-- Reverse lookup for tooltip display (when we need the name)
+local hasteBuffNames = {}
+for texture, data in pairs(hasteBuffsByTexture) do
+    hasteBuffNames[data.name] = true
+end
+
+-- buffDurations removed - duration is now stored in hasteBuffsByTexture table
+
+-- Hunter Instant Shots (should NOT reset auto shot timer)
+-- Based on Quiver addon: https://github.com/SabineWren/Quiver
+local instantShots = {
+    ["Arcane Shot"] = true,
+    ["Arkaner Schuss"] = true,  -- German
+    ["Serpent Sting"] = true,
+    ["Schlangenbiss"] = true,  -- German  
+    ["Viper Sting"] = true,
+    ["Vipernbiss"] = true,  -- German
+    ["Scorpid Sting"] = true,
+    ["Skorpidstich"] = true,  -- German
+    ["Concussive Shot"] = true,
+    ["Erschütternder Schuss"] = true,  -- German
+    ["Scatter Shot"] = true,
+    ["Streuschuss"] = true,  -- German
+    ["Wyvern Sting"] = true,
+    ["Wyvernstich"] = true,  -- German
+    ["Baited Shot"] = true,  -- Turtle WoW
+    ["Köder-Schuss"] = true,  -- German
+}
+
+local lastInstantShotTime = 0
+
+-- Get base ranged weapon speed from tooltip
+local function GetBaseWeaponSpeed()
+    local scanTip = CreateFrame("GameTooltip", "HamingwaysHunterToolsWeaponScan", nil, "GameTooltipTemplate")
+    scanTip:SetOwner(UIParent, "ANCHOR_NONE")
+    scanTip:ClearLines()
+    scanTip:SetInventoryItem("player", 18) -- Ranged slot
+    
+    for i = 1, scanTip:NumLines() do
+        local text = getglobal("HamingwaysHunterToolsWeaponScanTextRight" .. i)
+        if text then
+            local textStr = text:GetText()
+            if textStr then
+                local _, _, speed = string.find(textStr, "(%d+%.%d+)")
+                if speed then
+                    return tonumber(speed)
+                end
+            end
+        end
+    end
+    
+    -- Fallback to current speed
+    local currentSpeed = UnitRangedDamage("player")
+    return currentSpeed or 2.0
+end
+
+-- Calculate cast time with haste (like Quiver)
+-- ============ Castbar functions moved to HamingwaysHunterTools_Castbar.lua ============
+
+-- ============ Config Functions ============
+local function GetConfig()
+    HamingwaysHunterToolsDB = HamingwaysHunterToolsDB or {}
+    HamingwaysHunterToolsDB.minimapPos = HamingwaysHunterToolsDB.minimapPos or 225
+    HamingwaysHunterToolsDB.locked = HamingwaysHunterToolsDB.locked or false
+    HamingwaysHunterToolsDB.forceMode = HamingwaysHunterToolsDB.forceMode or "auto"  -- auto, vanilla, superwow
+    HamingwaysHunterToolsDB.frameWidth = HamingwaysHunterToolsDB.frameWidth or DEFAULT_FRAME_WIDTH
+    HamingwaysHunterToolsDB.frameHeight = HamingwaysHunterToolsDB.frameHeight or DEFAULT_FRAME_HEIGHT
+    HamingwaysHunterToolsDB.borderSize = HamingwaysHunterToolsDB.borderSize or DEFAULT_BORDER_SIZE
+    HamingwaysHunterToolsDB.castbarSpacing = HamingwaysHunterToolsDB.castbarSpacing or DEFAULT_CASTBAR_SPACING
+    HamingwaysHunterToolsDB.iconSize = HamingwaysHunterToolsDB.iconSize or DEFAULT_ICON_SIZE
+    HamingwaysHunterToolsDB.ammoIconSize = HamingwaysHunterToolsDB.ammoIconSize or DEFAULT_AMMO_ICON_SIZE
+    HamingwaysHunterToolsDB.statsFontSize = HamingwaysHunterToolsDB.statsFontSize or DEFAULT_STATS_FONT_SIZE
+    if HamingwaysHunterToolsDB.showStats == nil then
+        HamingwaysHunterToolsDB.showStats = true
+    end
+    if HamingwaysHunterToolsDB.showAmmo == nil then
+        HamingwaysHunterToolsDB.showAmmo = true
+    end
+    if HamingwaysHunterToolsDB.showAutoShotTimer == nil then
+        HamingwaysHunterToolsDB.showAutoShotTimer = true
+    end
+    if HamingwaysHunterToolsDB.showCastbar == nil then
+        HamingwaysHunterToolsDB.showCastbar = true
+    end
+    if HamingwaysHunterToolsDB.showBuffBar == nil then
+        HamingwaysHunterToolsDB.showBuffBar = true
+    end
+    if HamingwaysHunterToolsDB.showPetFeeder == nil then
+        HamingwaysHunterToolsDB.showPetFeeder = true
+    end
+    if HamingwaysHunterToolsDB.autoFeedPet == nil then
+        HamingwaysHunterToolsDB.autoFeedPet = true
+    end
+    if HamingwaysHunterToolsDB.feedOnClick == nil then
+        HamingwaysHunterToolsDB.feedOnClick = true
+    end
+    if HamingwaysHunterToolsDB.autoResetStats == nil then
+        HamingwaysHunterToolsDB.autoResetStats = true
+    end
+    HamingwaysHunterToolsDB.petFeederIconSize = HamingwaysHunterToolsDB.petFeederIconSize or DEFAULT_PET_FEEDER_ICON_SIZE
+    HamingwaysHunterToolsDB.selectedFood = HamingwaysHunterToolsDB.selectedFood or {}
+    HamingwaysHunterToolsDB.petFoodBlacklist = HamingwaysHunterToolsDB.petFoodBlacklist or {}
+    HamingwaysHunterToolsDB.showOnlyInCombat = HamingwaysHunterToolsDB.showOnlyInCombat ~= nil and HamingwaysHunterToolsDB.showOnlyInCombat or DEFAULT_SHOW_ONLY_IN_COMBAT
+    if HamingwaysHunterToolsDB.showTimerText == nil then
+        HamingwaysHunterToolsDB.showTimerText = true
+    end
+    HamingwaysHunterToolsDB.reloadColor = HamingwaysHunterToolsDB.reloadColor or {r=DEFAULT_RELOAD_COLOR.r, g=DEFAULT_RELOAD_COLOR.g, b=DEFAULT_RELOAD_COLOR.b}
+    HamingwaysHunterToolsDB.aimingColor = HamingwaysHunterToolsDB.aimingColor or {r=DEFAULT_AIMING_COLOR.r, g=DEFAULT_AIMING_COLOR.g, b=DEFAULT_AIMING_COLOR.b}
+    HamingwaysHunterToolsDB.castColor = HamingwaysHunterToolsDB.castColor or {r=DEFAULT_CAST_COLOR.r, g=DEFAULT_CAST_COLOR.g, b=DEFAULT_CAST_COLOR.b}
+    HamingwaysHunterToolsDB.bgColor = HamingwaysHunterToolsDB.bgColor or {r=DEFAULT_BG_COLOR.r, g=DEFAULT_BG_COLOR.g, b=DEFAULT_BG_COLOR.b}
+    HamingwaysHunterToolsDB.bgOpacity = HamingwaysHunterToolsDB.bgOpacity or DEFAULT_BG_OPACITY
+    
+    -- Melee Timer Defaults
+    HamingwaysHunterToolsDB.meleeColor = HamingwaysHunterToolsDB.meleeColor or {r=DEFAULT_MELEE_COLOR.r, g=DEFAULT_MELEE_COLOR.g, b=DEFAULT_MELEE_COLOR.b}
+    if HamingwaysHunterToolsDB.showMeleeTimer == nil then
+        HamingwaysHunterToolsDB.showMeleeTimer = DEFAULT_SHOW_MELEE_TIMER
+    end
+    if HamingwaysHunterToolsDB.meleeTimerOnlyInCombat == nil then
+        HamingwaysHunterToolsDB.meleeTimerOnlyInCombat = DEFAULT_MELEE_ONLY_IN_COMBAT
+    end
+    if HamingwaysHunterToolsDB.meleeTimerInsteadOfAutoShot == nil then
+        HamingwaysHunterToolsDB.meleeTimerInsteadOfAutoShot = DEFAULT_MELEE_INSTEAD_OF_AUTOSHOT
+    end
+    if HamingwaysHunterToolsDB.autoSwitchMeleeRanged == nil then
+        HamingwaysHunterToolsDB.autoSwitchMeleeRanged = DEFAULT_AUTO_SWITCH_MELEE_RANGED
+    end
+    
+    -- Warning Module Defaults
+    if HamingwaysHunterToolsDB.autoTrueshotAura == nil then
+        HamingwaysHunterToolsDB.autoTrueshotAura = false
+    end
+    if HamingwaysHunterToolsDB.showTrueshotWarning == nil then
+        HamingwaysHunterToolsDB.showTrueshotWarning = true
+    end
+    if HamingwaysHunterToolsDB.aspectTracking == nil then
+        HamingwaysHunterToolsDB.aspectTracking = true
+    end
+    if HamingwaysHunterToolsDB.showAspectWarning == nil then
+        HamingwaysHunterToolsDB.showAspectWarning = true
+    end
+    if HamingwaysHunterToolsDB.mainAspect == nil then
+        HamingwaysHunterToolsDB.mainAspect = "Aspect of the Hawk"
+    end
+    if HamingwaysHunterToolsDB.warningIconSize == nil then
+        HamingwaysHunterToolsDB.warningIconSize = 40
+    end
+    if HamingwaysHunterToolsDB.warningPoint == nil then
+        HamingwaysHunterToolsDB.warningPoint = "CENTER"
+    end
+    if HamingwaysHunterToolsDB.warningX == nil then
+        HamingwaysHunterToolsDB.warningX = 0
+    end
+    if HamingwaysHunterToolsDB.warningY == nil then
+        HamingwaysHunterToolsDB.warningY = -150
+    end
+    
+    -- Tranq Shot Announcer Defaults
+    if HamingwaysHunterToolsDB.enableTranq == nil then
+        HamingwaysHunterToolsDB.enableTranq = false
+    end
+    if HamingwaysHunterToolsDB.tranqChannel == nil then
+        HamingwaysHunterToolsDB.tranqChannel = "Raid"
+    end
+    if HamingwaysHunterToolsDB.tranqCastMsg == nil then
+        HamingwaysHunterToolsDB.tranqCastMsg = "Tranq Shot -> %t"
+    end
+    if HamingwaysHunterToolsDB.tranqMissMsg == nil then
+        HamingwaysHunterToolsDB.tranqMissMsg = "Tranq Shot MISSED! -> %t"
+    end
+    if HamingwaysHunterToolsDB.quiverCompat == nil then
+        HamingwaysHunterToolsDB.quiverCompat = true
+    end
+    
+    -- Proc Frame Defaults (Turtle WoW 1.18.1+ talents)
+    if HamingwaysHunterToolsDB.procFrameEnabled == nil then
+        HamingwaysHunterToolsDB.procFrameEnabled = true
+    end
+    if HamingwaysHunterToolsDB.procFrameLnlEnabled == nil then
+        HamingwaysHunterToolsDB.procFrameLnlEnabled = true
+    end
+    if HamingwaysHunterToolsDB.procFrameAmmoEnabled == nil then
+        HamingwaysHunterToolsDB.procFrameAmmoEnabled = true
+    end
+    if HamingwaysHunterToolsDB.procFrameIconSize == nil then
+        HamingwaysHunterToolsDB.procFrameIconSize = 40
+    end
+    if HamingwaysHunterToolsDB.procFrameShowAlways == nil then
+        HamingwaysHunterToolsDB.procFrameShowAlways = false
+    end
+    if HamingwaysHunterToolsDB.procFramePoint == nil then
+        HamingwaysHunterToolsDB.procFramePoint = "CENTER"
+    end
+    if HamingwaysHunterToolsDB.procFrameX == nil then
+        HamingwaysHunterToolsDB.procFrameX = 0
+    end
+    if HamingwaysHunterToolsDB.procFrameY == nil then
+        HamingwaysHunterToolsDB.procFrameY = -250
+    end
+
+    -- Appearance Settings Defaults
+    if HamingwaysHunterToolsDB.barStyle == nil then
+        HamingwaysHunterToolsDB.barStyle = "Interface\\TargetingFrame\\UI-StatusBar"
+    end
+    if HamingwaysHunterToolsDB.borderStyle == nil then
+        HamingwaysHunterToolsDB.borderStyle = "Interface\\Tooltips\\UI-Tooltip-Border"  -- Default: Tooltip style
+    end
+    
+    return {
+        minimapPos = HamingwaysHunterToolsDB.minimapPos,
+        locked = HamingwaysHunterToolsDB.locked,
+        frameWidth = HamingwaysHunterToolsDB.frameWidth,
+        frameHeight = HamingwaysHunterToolsDB.frameHeight,
+        borderSize = HamingwaysHunterToolsDB.borderSize,
+        castbarSpacing = HamingwaysHunterToolsDB.castbarSpacing,
+        iconSize = HamingwaysHunterToolsDB.iconSize,
+        ammoIconSize = HamingwaysHunterToolsDB.ammoIconSize,
+        petFeederIconSize = HamingwaysHunterToolsDB.petFeederIconSize,
+        statsFontSize = HamingwaysHunterToolsDB.statsFontSize,
+        showStats = HamingwaysHunterToolsDB.showStats,
+        showAmmo = HamingwaysHunterToolsDB.showAmmo,
+        showAutoShotTimer = HamingwaysHunterToolsDB.showAutoShotTimer,
+        showCastbar = HamingwaysHunterToolsDB.showCastbar,
+        showBuffBar = HamingwaysHunterToolsDB.showBuffBar,
+        showPetFeeder = HamingwaysHunterToolsDB.showPetFeeder,
+        autoFeedPet = HamingwaysHunterToolsDB.autoFeedPet,
+        feedOnClick = HamingwaysHunterToolsDB.feedOnClick,
+        autoResetStats = HamingwaysHunterToolsDB.autoResetStats,
+        selectedFood = HamingwaysHunterToolsDB.selectedFood,
+        petFoodBlacklist = HamingwaysHunterToolsDB.petFoodBlacklist,
+        showOnlyInCombat = HamingwaysHunterToolsDB.showOnlyInCombat,
+        showTimerText = HamingwaysHunterToolsDB.showTimerText,
+        reloadColor = HamingwaysHunterToolsDB.reloadColor,
+        aimingColor = HamingwaysHunterToolsDB.aimingColor,
+        castColor = HamingwaysHunterToolsDB.castColor,
+        bgColor = HamingwaysHunterToolsDB.bgColor,
+        bgOpacity = HamingwaysHunterToolsDB.bgOpacity,
+        meleeColor = HamingwaysHunterToolsDB.meleeColor,
+        showMeleeTimer = HamingwaysHunterToolsDB.showMeleeTimer,
+        meleeTimerOnlyInCombat = HamingwaysHunterToolsDB.meleeTimerOnlyInCombat,
+        meleeTimerInsteadOfAutoShot = HamingwaysHunterToolsDB.meleeTimerInsteadOfAutoShot,
+        autoSwitchMeleeRanged = HamingwaysHunterToolsDB.autoSwitchMeleeRanged,
+        autoTrueshotAura = HamingwaysHunterToolsDB.autoTrueshotAura,
+        showTrueshotWarning = HamingwaysHunterToolsDB.showTrueshotWarning,
+        aspectTracking = HamingwaysHunterToolsDB.aspectTracking,
+        showAspectWarning = HamingwaysHunterToolsDB.showAspectWarning,
+        mainAspect = HamingwaysHunterToolsDB.mainAspect,
+        warningIconSize = HamingwaysHunterToolsDB.warningIconSize,
+        warningPoint = HamingwaysHunterToolsDB.warningPoint,
+        warningX = HamingwaysHunterToolsDB.warningX,
+        warningY = HamingwaysHunterToolsDB.warningY,
+        enableTranq = HamingwaysHunterToolsDB.enableTranq,
+        tranqChannel = HamingwaysHunterToolsDB.tranqChannel,
+        tranqCastMsg = HamingwaysHunterToolsDB.tranqCastMsg,
+        tranqMissMsg = HamingwaysHunterToolsDB.tranqMissMsg,
+        quiverCompat = HamingwaysHunterToolsDB.quiverCompat,
+        barStyle = HamingwaysHunterToolsDB.barStyle,
+        borderStyle = HamingwaysHunterToolsDB.borderStyle,
+        procFrameEnabled     = HamingwaysHunterToolsDB.procFrameEnabled,
+        procFrameLnlEnabled  = HamingwaysHunterToolsDB.procFrameLnlEnabled,
+        procFrameAmmoEnabled = HamingwaysHunterToolsDB.procFrameAmmoEnabled,
+        procFrameIconSize    = HamingwaysHunterToolsDB.procFrameIconSize,
+        procFrameShowAlways  = HamingwaysHunterToolsDB.procFrameShowAlways,
+        procFramePoint       = HamingwaysHunterToolsDB.procFramePoint,
+        procFrameX           = HamingwaysHunterToolsDB.procFrameX,
+        procFrameY           = HamingwaysHunterToolsDB.procFrameY,
+    }
+end
+
+-- ============ Helper Functions ============
+-- Config cache for performance
+local configCache = nil
+
+local function InvalidateConfigCache()
+    configCache = nil
+end
+
+local function GetCachedConfig()
+    if not configCache then
+        configCache = GetConfig()
+    end
+    return configCache
+end
+
+-- Create backdrop configuration (used by multiple frames)
+local function CreateBackdrop(borderSize)
+    local cfg = GetConfig()
+    local borderStyle = cfg.borderStyle or "Interface\\Tooltips\\UI-Tooltip-Border"
+    
+    -- Ensure borderSize is always a number (Lua 5.0 compatible)
+    local size = borderSize or 0
+    if type(size) ~= "number" then size = 0 end
+    
+    -- Quiver-style: Simple/None uses WHITE8X8 with size 1
+    if borderStyle == "Interface\\BUTTONS\\WHITE8X8" then
+        local edgeSize = size
+        if edgeSize < 1 then edgeSize = 1 end
+        return {
+            bgFile = "Interface\\BUTTONS\\WHITE8X8",
+            edgeFile = "Interface\\BUTTONS\\WHITE8X8",
+            tile = false,
+            edgeSize = edgeSize,
+            insets = { left = 1, right = 1, top = 1, bottom = 1 }
+        }, 0.2, 0.2, 0.2, 0.8  -- Dark gray border for Simple style
+    elseif size > 0 then
+        return {
+            bgFile = "Interface\\BUTTONS\\WHITE8X8",
+            edgeFile = borderStyle,
+            tile = false,
+            edgeSize = size,
+            insets = { left = 2, right = 2, top = 2, bottom = 2 }
+        }, 0.6, 0.7, 0.7, 1.0  -- Light gray/cyan border for Tooltip/Dialog style
+    else
+        return {
+            bgFile = "Interface\\BUTTONS\\WHITE8X8",
+            edgeFile = nil,
+            tile = false,
+            edgeSize = 0,
+            insets = { left = 0, right = 0, top = 0, bottom = 0 }
+        }, 1, 1, 1, 1  -- White (won't be visible)
+    end
+end
+
+-- Make frame draggable with position saving
+local function MakeDraggable(frame, dbKeyPrefix)
+    -- Only set scripts if not already set (prevent multiple registrations)
+    if not frame.draggableInitialized then
+        frame:SetScript("OnDragStart", function()
+            if not this or not this:IsVisible() then return end
+            local cfg = GetCachedConfig()
+            if not cfg.locked then
+                this:StartMoving()
+            end
+        end)
+        frame:SetScript("OnDragStop", function()
+            if not this or not this:IsVisible() then return end
+            this:StopMovingOrSizing()
+            
+            -- Safely get position with error handling
+            local point, _, _, xOfs, yOfs = this:GetPoint()
+            if point and xOfs and yOfs then
+                HamingwaysHunterToolsDB = HamingwaysHunterToolsDB or {}
+                HamingwaysHunterToolsDB[dbKeyPrefix .. "Point"] = point
+                HamingwaysHunterToolsDB[dbKeyPrefix .. "X"] = xOfs
+                HamingwaysHunterToolsDB[dbKeyPrefix .. "Y"] = yOfs
+            end
+        end)
+        frame.draggableInitialized = true
+    end
+end
+
+-- Show tooltip with title and optional lines
+local function ShowTooltip(frame, title, lines, anchor)
+    GameTooltip:SetOwner(frame, anchor or "ANCHOR_RIGHT")
+    GameTooltip:SetText(title, 1, 1, 1)
+    if lines then
+        for i = 1, table.getn(lines) do
+            local line = lines[i]
+            if type(line) == "string" then
+                GameTooltip:AddLine(line, 0.8, 0.8, 0.8)
+            elseif type(line) == "table" then
+                GameTooltip:AddLine(line.text, line.r or 0.8, line.g or 0.8, line.b or 0.8)
+            end
+        end
+    end
+    GameTooltip:Show()
+end
+
+-- Create a checkbox control with label
+local function CreateCheckbox(name, parent, label, yOffset)
+    local checkbox = CreateFrame("CheckButton", name, parent, "UICheckButtonTemplate")
+    checkbox:SetPoint("TOPLEFT", 10, yOffset)
+    getglobal(checkbox:GetName().."Text"):SetText(label)
+    return checkbox
+end
+
+-- Create a slider control
+local function CreateSlider(name, parent, text, yOffset, minVal, maxVal, step, onValueChanged)
+    local slider = CreateFrame("Slider", name, parent, "OptionsSliderTemplate")
+    slider:SetPoint("TOPLEFT", 10, yOffset)
+    slider:SetMinMaxValues(minVal, maxVal)
+    slider:SetValueStep(step)
+    slider:SetWidth(250)
+    getglobal(slider:GetName().."Low"):SetText(tostring(minVal))
+    getglobal(slider:GetName().."High"):SetText(tostring(maxVal))
+    getglobal(slider:GetName().."Text"):SetText(text)
+    if onValueChanged then
+        slider:SetScript("OnValueChanged", onValueChanged)
+    end
+    return slider
+end
+
+-- ============ Colors (dynamic from config) ============
+
+-- ScanBaseWeaponSpeed moved to AutoShotTimer module
+
+-- UpdateWeaponSpeed, UpdateMeleeSpeed, IsTargetInMeleeRange moved to AutoShotTimer module
+
+-- UpdateCombatEventRegistration and UpdateTimerMode moved to AutoShotTimer module
+
+-- ============ Range Detection (provided to module via HHT_Core) ============
+-- Find spell by name (scans spellbook)
+local function FindSpellByName(spellName)
+    local i = 1
+    while true do
+        local name = GetSpellName(i, BOOKTYPE_SPELL)
+        if not name then return nil end
+        if name == spellName then return i end
+        i = i + 1
+    end
+end
+
+-- Find action bar slot by spell name (for IsActionInRange check)
+local function FindActionSlotBySpellName(spellName)
+    local spellIndex = FindSpellByName(spellName)
+    if not spellIndex then return nil end
+    
+    local texture = GetSpellTexture(spellIndex, BOOKTYPE_SPELL)
+    if not texture then return nil end
+    
+    for slot = 1, 120 do
+        if HasAction(slot) then
+            local actionTexture = GetActionTexture(slot)
+            if actionTexture == texture then
+                return slot
+            end
+        end
+    end
+    return nil
+end
+
+local function CheckSpellInRange(spellName)
+    local spellIndex = FindSpellByName(spellName)
+    if not spellIndex then return false end
+    
+    local slot = FindActionSlotBySpellName(spellName)
+    if not slot then return false end
+    
+    return IsActionInRange(slot) == 1
+end
+
+-- Store in HHT_Core for module access
+HHT_Core.CheckSpellInRange = CheckSpellInRange
+HHT_Core.GetBaseWeaponSpeed = GetBaseWeaponSpeed
+
+-- Scan Mounts tab in spellbook (Turtle WoW specific)
+local function ScanMountSpells()
+    mountSpells = {}  -- Reset table
+    local numTabs = GetNumSpellTabs()
+    
+    for tabIndex = 1, numTabs do
+        local tabName, tabTexture, tabOffset, numEntries = GetSpellTabInfo(tabIndex)
+        
+        -- Check if this is the Mounts tab (ZMounts in Turtle WoW)
+        if tabName == "ZMounts" or tabName == "Mounts" then
+            -- Scan all spells in this tab
+            for i = 1, numEntries do
+                local spellIndex = tabOffset + i
+                local spellName, spellRank = GetSpellName(spellIndex, BOOKTYPE_SPELL)
+                
+                if spellName then
+                    mountSpells[spellName] = true
+                end
+            end
+            break  -- Found the tab, no need to continue
+        end
+    end
+end
+
+-- Check if player is currently mounted (Turtle WoW)
+local function IsPlayerMounted()
+    -- Scan player buffs
+    local i = 1
+    while UnitBuff("player", i) do
+        local buffTexture = UnitBuff("player", i)
+        
+        -- Get buff name by scanning tooltip
+        GameTooltip:SetOwner(UIParent, "ANCHOR_NONE")
+        GameTooltip:SetUnitBuff("player", i)
+        local buffName = GameTooltipTextLeft1 and GameTooltipTextLeft1:GetText()
+        GameTooltip:Hide()
+        
+        if buffName and mountSpells[buffName] then
+            return true
+        end
+        
+        i = i + 1
+    end
+    
+    return false
+end
+
+-- ============ Frame Update functions (defined before CreateUI) ============
+local maxBarWidth = 0
+
+-- PERFORMANCE: Text caching to avoid unnecessary SetText() calls (LUA 5.0: use table to avoid upvalue limit)
+local textCache = {
+    barText = nil,
+    barTextTotal = nil,
+    barTextRange = nil,
+    lastUpdate = 0,
+    interval = 0.1,  -- Update text max 10x/second (smooth enough, 50% less overhead)
+    lastBlink = false
+}
+
+-- Bar update functions moved to HamingwaysHunterTools_AutoShotTimer.lua module
+
+local function UpdateAmmoDragState()
+    if ammoFrame then
+        local cfg = GetCachedConfig()
+        if cfg.locked then
+            ammoFrame:RegisterForDrag()  -- Disable dragging
+        else
+            ammoFrame:RegisterForDrag("LeftButton")  -- Enable dragging
+        end
+    end
+end
+
+local function UpdateStatsDragState()
+    if statsFrame then
+        local cfg = GetCachedConfig()
+        if cfg.locked then
+            statsFrame:RegisterForDrag()  -- Disable dragging
+        else
+            statsFrame:RegisterForDrag("LeftButton")  -- Enable dragging
+        end
+    end
+end
+
+local function ApplyFrameSettings()
+    local cfg = GetConfig()
+    
+    if frame then
+        frame:SetWidth(cfg.frameWidth)
+        frame:SetHeight(cfg.frameHeight)
+        local backdrop, br, bg, bb, ba = CreateBackdrop(cfg.borderSize)
+        frame:SetBackdrop(backdrop)
+        frame:SetBackdropColor(cfg.bgColor.r, cfg.bgColor.g, cfg.bgColor.b, cfg.bgOpacity)
+        frame:SetBackdropBorderColor(br, bg, bb, ba)
+        frame:EnableMouse(not cfg.locked)
+        if barFrame then
+            barFrame:SetHeight(cfg.frameHeight - 4)
+            -- Update bar texture
+            barFrame:SetTexture(cfg.barStyle or "Interface\\TargetingFrame\\UI-StatusBar")
+        end
+    end
+    
+    UpdateAmmoDragState()
+    UpdateStatsDragState()
+    
+    local castFrame = HHT_Castbar_GetFrame()
+    if castFrame then
+        castFrame:SetWidth(cfg.frameWidth)
+        castFrame:SetHeight(cfg.frameHeight)
+        castFrame:EnableMouse(not cfg.locked)
+        local backdrop, br, bg, bb, ba = CreateBackdrop(cfg.borderSize)
+        castFrame:SetBackdrop(backdrop)
+        castFrame:SetBackdropColor(cfg.bgColor.r, cfg.bgColor.g, cfg.bgColor.b, cfg.bgOpacity)
+        castFrame:SetBackdropBorderColor(br, bg, bb, ba)
+        castFrame:ClearAllPoints()
+        -- Position castbar relative to autoshot timer if it's shown, otherwise to screen center
+        if cfg.showAutoShotTimer and frame:IsShown() then
+            castFrame:SetPoint("BOTTOM", frame, "TOP", 0, cfg.castbarSpacing)
+        else
+            -- Position independently when autoshot timer is hidden
+            if not castFrame.independentPosition then
+                castFrame:SetPoint("CENTER", UIParent, "CENTER", 0, -200)
+                castFrame.independentPosition = true
+            end
+        end
+        -- Apply castbar module settings (bar texture, color, etc.)
+        HHT_Castbar_ApplySettings()
+    end
+    
+    if hasteFrame then
+        hasteFrame:SetWidth(cfg.frameWidth)
+        hasteFrame:SetHeight(cfg.iconSize + 4)
+    end
+    
+    if ammoMenuFrame then
+        local backdrop, br, bg, bb, ba = CreateBackdrop(cfg.borderSize)
+        ammoMenuFrame:SetBackdrop(backdrop)
+        ammoMenuFrame:SetBackdropColor(cfg.bgColor.r, cfg.bgColor.g, cfg.bgColor.b, cfg.bgOpacity)
+        ammoMenuFrame:SetBackdropBorderColor(br, bg, bb, ba)
+    end
+    
+    -- Apply settings to Pet Feeder Frame
+    if HHT_PetFeedFrame then
+        local iconSize = cfg.petFeederIconSize or DEFAULT_PET_FEEDER_ICON_SIZE
+        local dragPadding = 8  -- Extra padding for easier dragging
+        local frameWidth = iconSize * 2 + 9 + (dragPadding * 2)
+        local frameHeight = iconSize + 4 + (dragPadding * 2)
+        
+        HHT_PetFeedFrame:SetWidth(frameWidth)
+        HHT_PetFeedFrame:SetHeight(frameHeight)
+        
+        local backdrop, br, bg, bb, ba = CreateBackdrop(cfg.borderSize)
+        HHT_PetFeedFrame:SetBackdrop(backdrop)
+        
+        -- Keep green color but apply config opacity and border from CreateBackdrop
+        HHT_PetFeedFrame:SetBackdropColor(0, 0.6, 0, cfg.bgOpacity)
+        HHT_PetFeedFrame:SetBackdropBorderColor(br, bg, bb, ba)
+        
+        -- Update icon sizes and positions
+        if HHT_PetIconButton then
+            HHT_PetIconButton:SetWidth(iconSize)
+            HHT_PetIconButton:SetHeight(iconSize)
+            HHT_PetIconButton:ClearAllPoints()
+            HHT_PetIconButton:SetPoint("LEFT", HHT_PetFeedFrame, "LEFT", 2 + dragPadding, 0)
+        end
+        if HHT_FoodIconButton then
+            HHT_FoodIconButton:SetWidth(iconSize)
+            HHT_FoodIconButton:SetHeight(iconSize)
+            HHT_FoodIconButton:ClearAllPoints()
+            HHT_FoodIconButton:SetPoint("LEFT", HHT_PetIconButton, "RIGHT", 5, 0)
+        end
+    end
+    
+    maxBarWidth = cfg.frameWidth - 4
+end
+
+local function ApplyIconSize(iconSize)
+    if hasteFrame then
+        hasteFrame:SetHeight(iconSize + 4)
+        for i = 1, MAX_HASTE_ICONS do
+            if hasteIcons[i] then
+                hasteIcons[i]:SetWidth(iconSize)
+                hasteIcons[i]:SetHeight(iconSize)
+            end
+        end
+    end
+end
+
+local function ApplyAmmoIconSize(iconSize)
+    if ammoFrame then
+        local frameSize = iconSize + 16  -- Icon + padding
+        ammoFrame:SetWidth(frameSize)
+        ammoFrame:SetHeight(frameSize)
+        if ammoFrame.icon then
+            ammoFrame.icon:SetWidth(iconSize)
+            ammoFrame.icon:SetHeight(iconSize)
+        end
+    end
+end
+
+local function UpdateFrameVisibility()
+    local showOnlyInCombat = HamingwaysHunterToolsDB and HamingwaysHunterToolsDB.showOnlyInCombat
+    local inCombat = UnitAffectingCombat("player")
+    local state = HHT_AutoShot_GetState()
+    local shouldShow = not showOnlyInCombat or inCombat or HHT_Core.previewMode or HHT_Core.isCasting or (state and state.isShooting)
+    
+    -- PERFORMANCE: Use SetAlpha instead of Show/Hide (Quiver-style)
+    -- AutoShot Timer Frame
+    if frame and HamingwaysHunterToolsDB.showAutoShotTimer then
+        if shouldShow then
+            frame:SetAlpha(1)
+            frame:Show()
+        else
+            frame:SetAlpha(0)
+            if not HHT_Core.previewMode then frame:Hide() end
+        end
+    elseif frame then
+        frame:SetAlpha(0)
+        frame:Hide()
+    end
+    
+    -- Castbar - only hide if toggle is off OR if combat-only mode requires it
+    local castFrame = HHT_Castbar_GetFrame()
+    if castFrame then
+        if not HamingwaysHunterToolsDB.showCastbar then
+            castFrame:Hide()
+        elseif showOnlyInCombat and not inCombat and not HHT_Core.isCasting and not HHT_Core.previewMode then
+            castFrame:Hide()
+        end
+    end
+    
+    -- BuffBar - respect both toggle and combat setting
+    -- Note: Frame stays :Show() so OnUpdate keeps running, use SetAlpha for visibility
+    if hasteFrame then
+        if not HamingwaysHunterToolsDB.showBuffBar then
+            hasteFrame:SetAlpha(0)
+        elseif not shouldShow then
+            hasteFrame:SetAlpha(0)
+        end
+    end
+    
+    -- Pet Feeder - respect show toggle
+    if HHT_PetFeedFrame then
+        if not HamingwaysHunterToolsDB.showPetFeeder then
+            HHT_PetFeedFrame:Hide()
+        else
+            -- Force update when showing (restores selected food from SavedVariables)
+            HHT_PetFeeder_UpdateDisplay(true)
+        end
+    end
+end
+
+-- ============ Haste Buff Tracker Functions ============
+-- PERFORMANCE: Reusable tables to avoid GC pressure (Quiver object pooling pattern)
+local activeBuffs = {}
+local foundBuffs = {}
+local activeBuffCount = 0
+
+local function UpdateHasteBuffs()
+    if not hasteFrame then return end
+    if HHT_Core.previewMode then return end  -- Don't update buffs in preview mode
+    
+    -- Note: Always scan for haste buffs (needed for weapon speed calculation)
+    -- Visibility of buffbar is controlled separately below based on showBuffBar setting
+    
+    -- PERFORMANCE: Reuse tables instead of creating new ones (pfUI pattern)
+    for k in pairs(foundBuffs) do foundBuffs[k] = nil end
+    
+    -- Store old count to clear unused slots
+    local oldBuffCount = activeBuffCount
+    activeBuffCount = 0
+    local currentTime = GetTime()
+    
+    -- Scan all buff slots (Vanilla 1.12 API)
+    for i = 0, MAX_BUFF_SLOTS do
+        -- Get buff directly via GetPlayerBuff
+        local buffId = GetPlayerBuff(PLAYER_BUFF_START_ID + i, "HELPFUL")
+        if buffId >= 0 then
+            local buffTexture = GetPlayerBuffTexture(buffId)
+            local buffCount = GetPlayerBuffApplications(buffId)
+            local buffIndex = PLAYER_BUFF_START_ID + i  -- Store INDEX for GetPlayerBuffTimeLeft
+            local actualRemaining = GetPlayerBuffTimeLeft(buffIndex)
+            
+            -- TEXTURE-BASED DETECTION - 10000x faster than tooltip scan!
+            if buffTexture and hasteBuffsByTexture[buffTexture] then
+                local buffData = hasteBuffsByTexture[buffTexture]
+                local buffName = buffData.name
+                
+                -- Skip if we already found this buff (prevent duplicates)
+                -- Also skip if buff has expired (remaining time <= 0)
+                if not foundBuffs[buffName] and actualRemaining and actualRemaining > 0 then
+                    foundBuffs[buffName] = true
+                    
+                    -- PERFORMANCE: Reuse existing table entry instead of creating new one (Quiver pattern)
+                    activeBuffCount = activeBuffCount + 1
+                    if not activeBuffs[activeBuffCount] then
+                        activeBuffs[activeBuffCount] = {}
+                    end
+                    local buff = activeBuffs[activeBuffCount]
+                    buff.name = buffName
+                    buff.texture = buffTexture
+                    buff.buffIndex = buffIndex  -- Store INDEX for GetPlayerBuffTimeLeft
+                    buff.count = buffCount or 0
+                end
+            end
+        end
+    end
+    
+    -- Clear unused buff slots (prevent showing old buffs)
+    for i = activeBuffCount + 1, oldBuffCount do
+        if activeBuffs[i] then
+            activeBuffs[i].buffIndex = nil
+            activeBuffs[i].name = nil
+            activeBuffs[i].texture = nil
+        end
+    end
+    
+    -- Update icons
+    local iconSize = HamingwaysHunterToolsDB.iconSize or DEFAULT_ICON_SIZE
+    
+    for i = 1, MAX_HASTE_ICONS do
+        if not hasteIcons[i] then
+            hasteIcons[i] = CreateFrame("Frame", nil, hasteFrame)
+            hasteIcons[i]:SetWidth(iconSize)
+            hasteIcons[i]:SetHeight(iconSize)
+            
+            hasteIcons[i].icon = hasteIcons[i]:CreateTexture(nil, "BACKGROUND")
+            hasteIcons[i].icon:SetAllPoints()
+            hasteIcons[i].icon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
+            
+            hasteIcons[i].cooldown = hasteIcons[i]:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            hasteIcons[i].cooldown:SetPoint("BOTTOM", 0, 2)
+            hasteIcons[i].cooldown:SetTextColor(1, 1, 1, 1)
+            
+            if i == 1 then
+                hasteIcons[i]:SetPoint("TOPLEFT", hasteFrame, "TOPLEFT", 2, -2)
+            else
+                hasteIcons[i]:SetPoint("LEFT", hasteIcons[i-1], "RIGHT", 2, 0)
+            end
+        else
+            -- Update size for existing icons
+            hasteIcons[i]:SetWidth(iconSize)
+            hasteIcons[i]:SetHeight(iconSize)
+        end
+        
+        if activeBuffs[i] and activeBuffs[i].buffIndex then
+            -- Query API once and cache the value
+            local remaining = GetPlayerBuffTimeLeft(activeBuffs[i].buffIndex)
+            activeBuffs[i].cachedRemaining = remaining  -- Cache for UpdateBuffCountdowns
+            
+            -- Only show icon if buff still has time remaining
+            if remaining and remaining > 0 then
+                hasteIcons[i].icon:SetTexture(activeBuffs[i].texture)
+                local seconds = math.floor(remaining)
+                hasteIcons[i].cooldown:SetText(tostring(seconds))
+                hasteIcons[i]:Show()
+            else
+                -- Buff expired, hide icon
+                hasteIcons[i]:Hide()
+            end
+        else
+            hasteIcons[i]:Hide()
+        end
+    end
+    
+    -- Show/hide frame based on active buffs and combat setting
+    -- Note: Frame stays :Show() so OnUpdate keeps running, use SetAlpha for visibility
+    -- Always scan buffs for weapon speed, but only show bar if showBuffBar is enabled
+    if activeBuffCount > 0 and HamingwaysHunterToolsDB and HamingwaysHunterToolsDB.showBuffBar then
+        local showOnlyInCombat = HamingwaysHunterToolsDB and HamingwaysHunterToolsDB.showOnlyInCombat
+        local inCombat = UnitAffectingCombat("player")
+        local state = HHT_AutoShot_GetState()
+        if not showOnlyInCombat or inCombat or HHT_Core.previewMode or HHT_Core.isCasting or (state and state.isShooting) then
+            hasteFrame:SetAlpha(1)
+        else
+            hasteFrame:SetAlpha(0)
+        end
+    else
+        -- Hide frame if no buffs OR if showBuffBar is disabled
+        hasteFrame:SetAlpha(0)
+    end
+end
+
+-- Efficient OnUpdate for buff countdown (separate from UpdateHasteBuffs)
+local function UpdateBuffCountdowns()
+    -- CRITICAL: Early exit if no active buffs (most common case out of combat)
+    if activeBuffCount == 0 then return end
+    if not hasteFrame or not hasteFrame:IsShown() then return end
+    
+    for i = 1, activeBuffCount do
+        if activeBuffs[i] and activeBuffs[i].buffIndex and hasteIcons[i] and hasteIcons[i]:IsShown() then
+            -- Query API for current remaining time (needed for countdown)
+            local remaining = GetPlayerBuffTimeLeft(activeBuffs[i].buffIndex)
+            
+            if remaining > 0 then
+                local seconds = math.floor(remaining)
+                hasteIcons[i].cooldown:SetText(tostring(seconds))
+            else
+                hasteIcons[i].cooldown:SetText("0")
+            end
+        end
+    end
+end
+
+-- ============ Ammo Frame Functions ============
+local function FindAmmoInBags()
+    local ammoList = {}
+    local ammoCounts = {}  -- Track unique ammo types
+    
+    -- Scan all bags (0-4) - ItemID-based, NO tooltip scans!
+    for bag = 0, 4 do
+        local numSlots = GetContainerNumSlots(bag)
+        if numSlots and numSlots > 0 then
+            for slot = 1, numSlots do
+                local texture, count = GetContainerItemInfo(bag, slot)
+                if texture and count then
+                    -- Get ItemID directly - no tooltip needed!
+                    local itemLink = GetContainerItemLink(bag, slot)
+                    if itemLink then
+                        local _, _, itemID = string.find(itemLink, "item:(%d+)")
+                        itemID = tonumber(itemID)
+                        
+                        -- Check if this is ammo (instant lookup!)
+                        if itemID and AMMO_LOOKUP[itemID] then
+                            local itemName = GetItemInfo(itemID)
+                            
+                            if itemName then
+                                -- Check if this ammo already counted
+                                if ammoCounts[itemName] then
+                                    ammoCounts[itemName].count = ammoCounts[itemName].count + count
+                                else
+                                    ammoCounts[itemName] = {
+                                        bag = bag,
+                                        slot = slot,
+                                        name = itemName,
+                                        texture = texture,
+                                        count = count,
+                                        itemID = itemID
+                                    }
+                                    table.insert(ammoList, ammoCounts[itemName])
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    
+    return ammoList
+end
+
+local function UpdateAmmoDisplay()
+    if not ammoFrame then return end
+    if not HamingwaysHunterToolsDB.showAmmo then
+        ammoFrame:Hide()
+        return
+    end
+    
+    local ammoSlot = 0  -- Ammo slot in Vanilla
+    local ammoTexture = GetInventoryItemTexture("player", ammoSlot)
+    local ammoCount = GetInventoryItemCount("player", ammoSlot)
+    
+    if ammoTexture and ammoCount and ammoCount > 0 then
+        ammoFrame.icon:SetTexture(ammoTexture)
+        ammoFrame.text:SetText(tostring(ammoCount))
+        
+        -- Color based on count: green > 300, yellow <= 300 and > 100, red <= 100
+        if ammoCount > 300 then
+            ammoFrame.text:SetTextColor(0, 1, 0, 1)  -- Green
+            -- Stop blinking and reset icon color
+            if ammoFrame.blinkTimer then
+                ammoFrame.blinkTimer = nil
+                ammoFrame.icon:SetVertexColor(1, 1, 1, 1)  -- Normal white
+            end
+        elseif ammoCount > 100 then
+            ammoFrame.text:SetTextColor(1, 1, 0, 1)  -- Yellow
+            -- Stop blinking and reset icon color
+            if ammoFrame.blinkTimer then
+                ammoFrame.blinkTimer = nil
+                ammoFrame.icon:SetVertexColor(1, 1, 1, 1)  -- Normal white
+            end
+        else
+            ammoFrame.text:SetTextColor(1, 0, 0, 1)  -- Red
+            -- Start blinking red icon
+            if not ammoFrame.blinkTimer then
+                ammoFrame.blinkTimer = 0
+            end
+        end
+        
+        ammoFrame:Show()
+    else
+        -- No ammo: show warning icon and blink
+        ammoFrame.icon:SetTexture("Interface\\Icons\\Inv_Misc_QuestionMark")
+        ammoFrame.text:SetText("0")
+        ammoFrame.text:SetTextColor(1, 0, 0, 1)  -- Red
+        -- Start blinking
+        if not ammoFrame.blinkTimer then
+            ammoFrame.blinkTimer = 0
+        end
+        ammoFrame:Show()
+    end
+end
+
+local function EquipAmmo(bag, slot)
+    -- Pick up ammo from bag
+    PickupContainerItem(bag, slot)
+    -- Equip it to ammo slot (slot 0)
+    PickupInventoryItem(0)
+end
+
+local function ShowAmmoMenu()
+    if not ammoMenuFrame then
+        -- Create menu frame
+        local cfg = GetConfig()
+        ammoMenuFrame = CreateFrame("Frame", "HamingwaysHunterToolsAmmoMenu", UIParent)
+        ammoMenuFrame:SetFrameStrata("DIALOG")
+        local backdrop = CreateBackdrop(cfg.borderSize)
+        ammoMenuFrame:SetBackdrop(backdrop)
+        ammoMenuFrame:SetBackdropColor(cfg.bgColor.r, cfg.bgColor.g, cfg.bgColor.b, cfg.bgOpacity)
+        ammoMenuFrame:EnableMouse(true)
+        ammoMenuFrame.buttons = {}
+    end
+    
+    -- Hide old buttons
+    for _, btn in ipairs(ammoMenuFrame.buttons) do
+        btn:Hide()
+    end
+    
+    local ammoList = FindAmmoInBags()
+    
+    if table.getn(ammoList) == 0 then
+        ammoMenuFrame:Hide()
+        return
+    end
+    
+    -- Calculate frame size
+    local buttonHeight = 32
+    local padding = 8
+    local frameHeight = table.getn(ammoList) * (buttonHeight + 2) + padding * 2
+    local frameWidth = 200
+    
+    ammoMenuFrame:SetWidth(frameWidth)
+    ammoMenuFrame:SetHeight(frameHeight)
+    ammoMenuFrame:ClearAllPoints()
+    ammoMenuFrame:SetPoint("BOTTOM", ammoFrame, "TOP", 0, 5)
+    
+    -- Create/update buttons
+    for i, ammo in ipairs(ammoList) do
+        local btn = ammoMenuFrame.buttons[i]
+        if not btn then
+            btn = CreateFrame("Button", nil, ammoMenuFrame)
+            btn:SetWidth(frameWidth - padding * 2)
+            btn:SetHeight(buttonHeight)
+            btn:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight")
+            
+            btn.icon = btn:CreateTexture(nil, "ARTWORK")
+            btn.icon:SetWidth(buttonHeight - 4)
+            btn.icon:SetHeight(buttonHeight - 4)
+            btn.icon:SetPoint("LEFT", 4, 0)
+            btn.icon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
+            
+            btn.text = btn:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            btn.text:SetPoint("LEFT", btn.icon, "RIGHT", 4, 0)
+            btn.text:SetJustifyH("LEFT")
+            
+            btn.count = btn:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            btn.count:SetPoint("RIGHT", -4, 0)
+            btn.count:SetJustifyH("RIGHT")
+            
+            ammoMenuFrame.buttons[i] = btn
+        end
+        
+        btn.icon:SetTexture(ammo.texture)
+        btn.text:SetText(ammo.name)
+        btn.count:SetText(tostring(ammo.count))
+        btn.ammoBag = ammo.bag
+        btn.ammoSlot = ammo.slot
+        
+        btn:ClearAllPoints()
+        btn:SetPoint("TOPLEFT", padding, -(padding + (i - 1) * (buttonHeight + 2)))
+        
+        btn:SetScript("OnClick", function()
+            EquipAmmo(this.ammoBag, this.ammoSlot)
+            ammoMenuFrame:Hide()
+            UpdateAmmoDisplay()
+        end)
+        
+        btn:SetScript("OnEnter", function()
+            if this.ammoBag and this.ammoSlot then
+                GameTooltip:SetOwner(this, "ANCHOR_RIGHT")
+                GameTooltip:SetBagItem(this.ammoBag, this.ammoSlot)
+                GameTooltip:Show()
+            end
+        end)
+        
+        btn:SetScript("OnLeave", function()
+            GameTooltip:Hide()
+        end)
+        
+        btn:Show()
+    end
+    
+    ammoMenuFrame:Show()
+end
+
+-- ============ Statistics Frame Functions ============
+local function ReportStats(channel)
+    local avgReaction = 0
+    local minReaction = 9999
+    local maxReaction = 0
+    local count = table.getn(reactionTimes)
+    
+    if count > 0 then
+        local sum = 0
+        for i, time in ipairs(reactionTimes) do
+            sum = sum + time
+            if time < minReaction then minReaction = time end
+            if time > maxReaction then maxReaction = time end
+        end
+        avgReaction = sum / count
+    else
+        minReaction = 0
+    end
+    
+    local skippedPercent = 0
+    if totalCastSequences > 0 then
+        skippedPercent = (skippedAutoShots / totalCastSequences) * 100
+    end
+    
+    local delayedCount = table.getn(delayedAutoShotTimes)
+    local totalDelayed = 0
+    if delayedCount > 0 then
+        for i, time in ipairs(delayedAutoShotTimes) do
+            totalDelayed = totalDelayed + time
+        end
+    end
+    
+    -- Format report message (escape pipe characters for chat)
+    local msg1 = string.format("[HHT] Avg: %.3fs - Min: %.3fs - Max: %.3fs - Samples: %d", avgReaction, minReaction, maxReaction, count)
+    local msg2 = string.format("[HHT] Skipped AS: %d (%.1f%%) - AS delays: %d (%.3fs total)", skippedAutoShots, skippedPercent, delayedCount, totalDelayed)
+    
+    -- Send to channel
+    if channel == "WHISPER" then
+        local targetName = UnitName("target")
+        if targetName then
+            SendChatMessage(msg1, "WHISPER", nil, targetName)
+            SendChatMessage(msg2, "WHISPER", nil, targetName)
+        else
+            print("HHT: No target selected for whisper")
+        end
+    else
+        SendChatMessage(msg1, channel)
+        SendChatMessage(msg2, channel)
+    end
+end
+
+local function ResetStats()
+    reactionTimes = {}
+    lastAutoShotTime = 0
+    lastCastTime = 0
+    autoShotBetweenCasts = false
+    skippedAutoShots = 0
+    totalCastSequences = 0
+    delayedAutoShotTimes = {}
+    print("HHT: Reaction time statistics reset")
+end
+
+local statsContextMenu = nil
+
+local function ShowStatsContextMenu()
+    if statsContextMenu and statsContextMenu:IsShown() then
+        statsContextMenu:Hide()
+        return
+    end
+    
+    if not statsContextMenu then
+        statsContextMenu = CreateFrame("Frame", "HamingwaysHunterToolsStatsContextMenu", UIParent)
+        statsContextMenu:SetFrameStrata("TOOLTIP")
+        statsContextMenu:SetBackdrop({
+            bgFile = "Interface\\BUTTONS\\WHITE8X8",
+            edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+            tile = false, edgeSize = 12,
+            insets = { left = 3, right = 3, top = 3, bottom = 3 }
+        })
+        local cfg = GetConfig()
+        statsContextMenu:SetBackdropColor(cfg.bgColor.r, cfg.bgColor.g, cfg.bgColor.b, cfg.bgOpacity)
+        statsContextMenu:SetBackdropBorderColor(0.5, 0.5, 0.5, 1)
+        statsContextMenu:EnableMouse(true)
+        statsContextMenu:SetWidth(120)
+        statsContextMenu:SetHeight(117)
+        statsContextMenu:SetPoint("CENTER", UIParent, "CENTER")
+        statsContextMenu.buttons = {}
+        
+        -- Reset button
+        local resetBtn = CreateFrame("Button", nil, statsContextMenu)
+        resetBtn:SetWidth(110)
+        resetBtn:SetHeight(20)
+        resetBtn:SetPoint("TOP", statsContextMenu, "TOP", 0, -5)
+        resetBtn:SetBackdrop({
+            bgFile = "Interface\\BUTTONS\\WHITE8X8",
+            edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+            tile = false, edgeSize = 8,
+            insets = { left = 2, right = 2, top = 2, bottom = 2 }
+        })
+        resetBtn:SetBackdropColor(0.2, 0.2, 0.2, 1)
+        resetBtn:SetBackdropBorderColor(0.4, 0.4, 0.4, 1)
+        local resetText = resetBtn:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        resetText:SetPoint("CENTER", resetBtn, "CENTER")
+        resetText:SetText("Reset")
+        resetBtn:SetScript("OnClick", function()
+            ResetStats()
+            statsContextMenu:Hide()
+        end)
+        resetBtn:SetScript("OnEnter", function()
+            this:SetBackdropColor(0.3, 0.3, 0.3, 1)
+        end)
+        resetBtn:SetScript("OnLeave", function()
+            this:SetBackdropColor(0.2, 0.2, 0.2, 1)
+        end)
+        
+        -- Report buttons
+        local channels = {
+            {name = "Say", channel = "SAY"},
+            {name = "Party", channel = "PARTY"},
+            {name = "Guild", channel = "GUILD"},
+            {name = "Raid", channel = "RAID"},
+            {name = "Whisper", channel = "WHISPER"}
+        }
+        
+        for i, ch in ipairs(channels) do
+            local btn = CreateFrame("Button", nil, statsContextMenu)
+            btn:SetWidth(110)
+            btn:SetHeight(16)
+            btn:SetPoint("TOP", statsContextMenu, "TOP", 0, -30 - (i-1)*17)
+            btn:SetBackdrop({
+                bgFile = "Interface\\BUTTONS\\WHITE8X8",
+                edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+                tile = false, edgeSize = 8,
+                insets = { left = 2, right = 2, top = 2, bottom = 2 }
+            })
+            btn:SetBackdropColor(0.2, 0.2, 0.2, 1)
+            btn:SetBackdropBorderColor(0.4, 0.4, 0.4, 1)
+            local btnText = btn:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            btnText:SetPoint("CENTER", btn, "CENTER")
+            btnText:SetText("Report > " .. ch.name)
+            btn.channel = ch.channel
+            btn:SetScript("OnClick", function()
+                ReportStats(this.channel)
+                statsContextMenu:Hide()
+            end)
+            btn:SetScript("OnEnter", function()
+                this:SetBackdropColor(0.3, 0.3, 0.3, 1)
+            end)
+            btn:SetScript("OnLeave", function()
+                this:SetBackdropColor(0.2, 0.2, 0.2, 1)
+            end)
+        end
+    end
+    
+    -- Position menu next to stats frame
+    statsContextMenu:ClearAllPoints()
+    statsContextMenu:SetPoint("LEFT", statsFrame, "RIGHT", 5, 0)
+    statsContextMenu:Show()
+end
+
+local function UpdateStatsDisplay()
+    if not statsFrame or not HamingwaysHunterToolsDB.showStats then 
+        if statsFrame then statsFrame:Hide() end
+        return 
+    end
+    
+    local avgReaction = 0
+    local minReaction = 9999
+    local maxReaction = 0
+    local lastReaction = 0
+    local count = table.getn(reactionTimes)
+    
+    if count > 0 then
+        local sum = 0
+        for i, time in ipairs(reactionTimes) do
+            sum = sum + time
+            if time < minReaction then minReaction = time end
+            if time > maxReaction then maxReaction = time end
+        end
+        avgReaction = sum / count
+        lastReaction = reactionTimes[count]
+    else
+        minReaction = 0
+    end
+    
+    -- Color coding function: green <= 0.2, yellow <= 0.35, red > 0.35
+    local function GetColorForTime(time)
+        if time <= 0.2 then
+            return 0, 1, 0  -- Green
+        elseif time <= 0.35 then
+            return 1, 1, 0  -- Yellow
+        else
+            return 1, 0, 0  -- Red
+        end
+    end
+    
+    if statsFrame.avgText then
+        statsFrame.avgText:SetText(string.format("Avg Reaction: %.3fs", avgReaction))
+        local r, g, b = GetColorForTime(avgReaction)
+        statsFrame.avgText:SetTextColor(r, g, b, 1)
+    end
+    if statsFrame.minText then
+        statsFrame.minText:SetText(string.format("Min: %.3fs", minReaction))
+        local r, g, b = GetColorForTime(minReaction)
+        statsFrame.minText:SetTextColor(r, g, b, 1)
+    end
+    if statsFrame.maxText then
+        statsFrame.maxText:SetText(string.format("Max: %.3fs", maxReaction))
+        local r, g, b = GetColorForTime(maxReaction)
+        statsFrame.maxText:SetTextColor(r, g, b, 1)
+    end
+    if statsFrame.lastText then
+        statsFrame.lastText:SetText(string.format("Last: %.3fs", lastReaction))
+        local r, g, b = GetColorForTime(lastReaction)
+        statsFrame.lastText:SetTextColor(r, g, b, 1)
+    end
+    if statsFrame.countText then
+        statsFrame.countText:SetText(string.format("Samples: %d", count))
+        statsFrame.countText:SetTextColor(1, 1, 1, 1)  -- White
+    end
+    
+    -- Calculate skipped auto-shots percentage
+    local skippedPercent = 0
+    if totalCastSequences > 0 then
+        skippedPercent = (skippedAutoShots / totalCastSequences) * 100
+    end
+    
+    -- Calculate delayed auto-shot statistics
+    local lastDelayed = 0
+    local totalDelayed = 0
+    local delayedCount = table.getn(delayedAutoShotTimes)
+    if delayedCount > 0 then
+        for i, time in ipairs(delayedAutoShotTimes) do
+            totalDelayed = totalDelayed + time
+        end
+        lastDelayed = delayedAutoShotTimes[delayedCount]
+    end
+    
+    if statsFrame.skippedText then
+        statsFrame.skippedText:SetText(string.format("Skipped AS: %d (%.1f%%)", skippedAutoShots, skippedPercent))
+        -- Color: green if 0%, yellow if <20%, red if >=20%
+        if skippedPercent == 0 then
+            statsFrame.skippedText:SetTextColor(0, 1, 0, 1)
+        elseif skippedPercent < 20 then
+            statsFrame.skippedText:SetTextColor(1, 1, 0, 1)
+        else
+            statsFrame.skippedText:SetTextColor(1, 0, 0, 1)
+        end
+    end
+    if statsFrame.lastDelayedText then
+        statsFrame.lastDelayedText:SetText(string.format("Last AS delay: %.3fs", lastDelayed))
+        local r, g, b = GetColorForTime(lastDelayed)
+        statsFrame.lastDelayedText:SetTextColor(r, g, b, 1)
+    end
+    if statsFrame.totalDelayedText then
+        statsFrame.totalDelayedText:SetText(string.format("AS delay total: %.3fs", totalDelayed))
+        local r, g, b = GetColorForTime(totalDelayed)
+        statsFrame.totalDelayedText:SetTextColor(r, g, b, 1)
+    end
+    if statsFrame.delayedCountText then
+        statsFrame.delayedCountText:SetText(string.format("Nr AS delays: %d", delayedCount))
+        statsFrame.delayedCountText:SetTextColor(1, 1, 1, 1)  -- White
+    end
+    
+    statsFrame:Show()
+end
+
+local function CreateStatsFrame()
+    local cfg = GetConfig()
+    local fontSize = cfg.statsFontSize or DEFAULT_STATS_FONT_SIZE
+    
+    statsFrame = CreateFrame("Frame", "HamingwaysHunterToolsStatsFrame", UIParent)
+    statsFrame:SetWidth(180)
+    statsFrame:SetHeight(182)  -- Increased height for new fields
+    statsFrame:SetFrameStrata("MEDIUM")
+    statsFrame:SetBackdrop({
+        bgFile = "Interface\\BUTTONS\\WHITE8X8",
+        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+        tile = false, edgeSize = 12,
+        insets = { left = 3, right = 3, top = 3, bottom = 3 }
+    })
+    statsFrame:SetBackdropColor(0, 0, 0, 0.8)
+    statsFrame:SetBackdropBorderColor(0.5, 0.5, 0.5, 1)
+    statsFrame:SetPoint("CENTER", UIParent, "CENTER", 250, 150)
+    
+    -- Title
+    statsFrame.title = statsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    statsFrame.title:SetPoint("TOP", 0, -6)
+    statsFrame.title:SetText("Reaction Time")
+    statsFrame.title:SetTextColor(1, 0.82, 0, 1)
+    
+    -- Average Reaction
+    statsFrame.avgText = statsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    statsFrame.avgText:SetPoint("TOPLEFT", 8, -22)
+    statsFrame.avgText:SetText("Avg Reaction: 0.000s")
+    statsFrame.avgText:SetJustifyH("LEFT")
+    
+    -- Min Reaction
+    statsFrame.minText = statsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    statsFrame.minText:SetPoint("TOPLEFT", 8, -38)
+    statsFrame.minText:SetText("Min: 0.000s")
+    statsFrame.minText:SetJustifyH("LEFT")
+    
+    -- Max Reaction
+    statsFrame.maxText = statsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    statsFrame.maxText:SetPoint("TOPLEFT", 8, -54)
+    statsFrame.maxText:SetText("Max: 0.000s")
+    statsFrame.maxText:SetJustifyH("LEFT")
+    
+    -- Last Reaction
+    statsFrame.lastText = statsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    statsFrame.lastText:SetPoint("TOPLEFT", 8, -70)
+    statsFrame.lastText:SetText("Last: 0.000s")
+    statsFrame.lastText:SetJustifyH("LEFT")
+    
+    -- Sample Count
+    statsFrame.countText = statsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    statsFrame.countText:SetPoint("TOPLEFT", 8, -86)
+    statsFrame.countText:SetText("Samples: 0")
+    statsFrame.countText:SetJustifyH("LEFT")
+    
+    -- Separator
+    statsFrame.separator = statsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    statsFrame.separator:SetPoint("TOPLEFT", 8, -102)
+    statsFrame.separator:SetText("--- Details ---")
+    statsFrame.separator:SetTextColor(0.5, 0.5, 0.5, 1)
+    statsFrame.separator:SetJustifyH("LEFT")
+    
+    -- Skipped Auto-Shots
+    statsFrame.skippedText = statsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    statsFrame.skippedText:SetPoint("TOPLEFT", 8, -118)
+    statsFrame.skippedText:SetText("Skipped AS: 0 (0.0%)")
+    statsFrame.skippedText:SetJustifyH("LEFT")
+    
+    -- Last AS delay
+    statsFrame.lastDelayedText = statsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    statsFrame.lastDelayedText:SetPoint("TOPLEFT", 8, -134)
+    statsFrame.lastDelayedText:SetText("Last AS delay: 0.000s")
+    statsFrame.lastDelayedText:SetJustifyH("LEFT")
+    
+    -- Total AS delay
+    statsFrame.totalDelayedText = statsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    statsFrame.totalDelayedText:SetPoint("TOPLEFT", 8, -150)
+    statsFrame.totalDelayedText:SetText("AS delay total: 0.000s")
+    statsFrame.totalDelayedText:SetJustifyH("LEFT")
+    
+    -- Nr AS delays
+    statsFrame.delayedCountText = statsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    statsFrame.delayedCountText:SetPoint("TOPLEFT", 8, -166)
+    statsFrame.delayedCountText:SetText("Nr AS delays: 0")
+    statsFrame.delayedCountText:SetJustifyH("LEFT")
+    
+    -- Dragging (only when unlocked)
+    statsFrame:EnableMouse(true)
+    statsFrame:SetMovable(true)
+    MakeDraggable(statsFrame, "stats")
+    
+    -- Right-click context menu
+    statsFrame:SetScript("OnMouseDown", function()
+        if arg1 == "RightButton" then
+            ShowStatsContextMenu()
+        end
+    end)
+    
+    -- Tooltip
+    statsFrame:SetScript("OnEnter", function()
+        ShowTooltip(this, "Reaction Time", {
+            {text = "Shows the delay between", r = 0.8, g = 0.8, b = 0.8},
+            {text = "Auto-Shot and Cast-Start", r = 0.8, g = 0.8, b = 0.8},
+            " ",
+            {text = "Right-click for options", r = 0.6, g = 0.6, b = 0.6}
+        }, "ANCHOR_RIGHT")
+    end)
+    statsFrame:SetScript("OnLeave", function()
+        GameTooltip:Hide()
+    end)
+    
+    -- Update throttle (pfUI-style)
+    statsFrame:SetScript("OnUpdate", function()
+        -- PERFORMANCE: Early exit if frame hidden or feature disabled
+        if not this:IsShown() or not HamingwaysHunterToolsDB or not HamingwaysHunterToolsDB.showStats then
+            return
+        end
+        
+        -- pfUI pattern: more efficient throttling
+        if (this.tick or 1) > GetTime() then return else this.tick = GetTime() + 0.2 end
+        UpdateStatsDisplay()
+    end)
+    
+    return statsFrame
+end
+
+local function CreateAmmoFrame()
+    local cfg = GetConfig()
+    local iconSize = cfg.ammoIconSize or DEFAULT_AMMO_ICON_SIZE
+    
+    ammoFrame = CreateFrame("Button", "HamingwaysHunterToolsAmmoFrame", UIParent)
+    ammoFrame:SetWidth(iconSize)
+    ammoFrame:SetHeight(iconSize + 20)  -- Extra height for text
+    ammoFrame:SetFrameStrata("MEDIUM")
+    ammoFrame:SetPoint("CENTER", UIParent, "CENTER", 200, -202)
+    
+    -- Icon (no border)
+    ammoFrame.icon = ammoFrame:CreateTexture(nil, "ARTWORK")
+    ammoFrame.icon:SetPoint("TOP", 0, 0)
+    ammoFrame.icon:SetWidth(iconSize)
+    ammoFrame.icon:SetHeight(iconSize)
+    ammoFrame.icon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
+    
+    -- Count text
+    ammoFrame.text = ammoFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    ammoFrame.text:SetPoint("TOP", ammoFrame.icon, "BOTTOM", 0, -2)
+    ammoFrame.text:SetTextColor(1, 1, 1, 1)
+    ammoFrame.text:SetText("")
+    
+    -- Dragging (only when unlocked) and clicking (always enabled)
+    ammoFrame:EnableMouse(true)
+    ammoFrame:SetMovable(true)
+    
+    ammoFrame:SetScript("OnClick", function()
+        if ammoMenuFrame and ammoMenuFrame:IsShown() then
+            ammoMenuFrame:Hide()
+        else
+            ShowAmmoMenu()
+        end
+    end)
+    
+    MakeDraggable(ammoFrame, "ammo")
+    
+    -- Tooltip
+    ammoFrame:SetScript("OnEnter", function()
+        GameTooltip:SetOwner(this, "ANCHOR_RIGHT")
+        GameTooltip:SetInventoryItem("player", 0)
+        GameTooltip:Show()
+    end)
+    ammoFrame:SetScript("OnLeave", function()
+        GameTooltip:Hide()
+    end)
+    
+    -- Update throttle
+    ammoFrame:SetScript("OnUpdate", function()
+        -- PERFORMANCE: Early exit if frame hidden or feature disabled
+        if not this:IsShown() or not HamingwaysHunterToolsDB or not HamingwaysHunterToolsDB.showAmmo then
+            return
+        end
+        
+        -- pfUI pattern: more efficient throttling
+        if (this.tick or 1) > GetTime() then return else this.tick = GetTime() + 0.5 end
+        UpdateAmmoDisplay()
+        
+        -- Handle blinking when ammo is low (red) - blink the icon
+        if this.blinkTimer then
+            local elapsed = arg1 or 0
+            this.blinkTimer = this.blinkTimer + elapsed
+            -- Blink every 0.5 seconds (on for 0.25s, off for 0.25s)
+            local blinkCycle = math.mod(this.blinkTimer, 0.5)
+            if blinkCycle < 0.25 then
+                this.icon:SetVertexColor(1, 0, 0, 1)  -- Red icon
+            else
+                this.icon:SetVertexColor(1, 1, 1, 1)  -- Normal icon
+            end
+        end
+    end)
+    
+    return ammoFrame
+end
+
+-- ============ Helper Function for Event Management ============
+-- Helper function to manage PLAYER_AURAS_CHANGED registration
+-- (Defined here before CreateConfigUI to avoid forward reference)
+local function UpdateAurasEventRegistration()
+    if not HamingwaysHunterToolsDB then return end
+    
+    local needsEvent = HamingwaysHunterToolsDB.showBuffBar or  -- For UpdateWeaponSpeed (haste detection)
+                       HamingwaysHunterToolsDB.showPetFeeder or 
+                       HamingwaysHunterToolsDB.showTrueshotWarning or 
+                       HamingwaysHunterToolsDB.showAspectWarning
+    
+    if needsEvent then
+        AH:RegisterEvent("PLAYER_AURAS_CHANGED")
+    else
+        AH:UnregisterEvent("PLAYER_AURAS_CHANGED")
+    end
+end
+
+-- ============ Config Preview Functions ============
+-- ============ Config Preview Functions ============
+local function ShowConfigPreview()
+    HHT_Core.previewMode = true
+    local cfg = GetConfig()
+    local iconSize = cfg.iconSize or DEFAULT_ICON_SIZE
+    
+    -- PERFORMANCE: Enable OnUpdate when preview mode starts
+    HHT_AutoShot_EnableOnUpdate()
+    
+    -- Show AutoShot frame in preview (ALWAYS)
+    if frame then
+        frame:Show()
+    end
+    
+    -- Show castbar with preview (ALWAYS)
+    HHT_Castbar_ShowPreview(cfg.frameWidth, cfg.showTimerText)
+    
+    -- Show all haste buffs in preview (ALWAYS)
+    if hasteFrame then
+        hasteFrame:Show()  -- Ensure frame is visible
+        
+        local previewBuffs = {
+            {name = "Rapid Fire", texture = "Interface\\Icons\\Ability_Hunter_RunningShot", remaining = 15},
+            {name = "Quick Shots", texture = "Interface\\Icons\\Ability_Warrior_InnerRage", remaining = 12},
+            {name = "Berserking", texture = "Interface\\Icons\\Racial_Troll_Berserking", remaining = 10},
+            {name = "Essence of the Red", texture = "Interface\\Icons\\INV_Potion_26", remaining = 20},
+            {name = "Kiss of the Spider", texture = "Interface\\Icons\\INV_Misc_MonsterSpiderCarapace_01", remaining = 15},
+            {name = "Potion of Quickness", texture = "Interface\\Icons\\INV_Potion_03", remaining = 30},
+            {name = "Juju Flurry", texture = "Interface\\Icons\\INV_Misc_MonsterClaw_04", remaining = 20},
+        }
+        
+        for i = 1, MAX_HASTE_ICONS do
+            if not hasteIcons[i] then
+                hasteIcons[i] = CreateFrame("Frame", nil, hasteFrame)
+                hasteIcons[i]:SetWidth(iconSize)
+                hasteIcons[i]:SetHeight(iconSize)
+                
+                hasteIcons[i].icon = hasteIcons[i]:CreateTexture(nil, "BACKGROUND")
+                hasteIcons[i].icon:SetAllPoints()
+                hasteIcons[i].icon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
+                
+                hasteIcons[i].cooldown = hasteIcons[i]:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+                hasteIcons[i].cooldown:SetPoint("BOTTOM", 0, 2)
+                hasteIcons[i].cooldown:SetTextColor(1, 1, 1, 1)
+                
+                if i == 1 then
+                    hasteIcons[i]:SetPoint("TOPLEFT", hasteFrame, "TOPLEFT", 2, -2)
+                else
+                    hasteIcons[i]:SetPoint("LEFT", hasteIcons[i-1], "RIGHT", 2, 0)
+                end
+            else
+                hasteIcons[i]:SetWidth(iconSize)
+                hasteIcons[i]:SetHeight(iconSize)
+            end
+            
+            if previewBuffs[i] then
+                hasteIcons[i].icon:SetTexture(previewBuffs[i].texture)
+                hasteIcons[i].cooldown:SetText(tostring(previewBuffs[i].remaining))
+                hasteIcons[i]:Show()
+            else
+                hasteIcons[i]:Hide()
+            end
+        end
+        
+        hasteFrame:Show()
+    end
+    
+    -- Show Ammo frame with preview (ALWAYS)
+    if not ammoFrame then
+        CreateAmmoFrame()
+    end
+    if ammoFrame then
+        -- Set preview ammo icon and count
+        ammoFrame.icon:SetTexture("Interface\\Icons\\INV_Ammo_Arrow_02")
+        ammoFrame.text:SetText("1337")
+        ammoFrame:Show()
+    end
+    
+    -- Show Pet Feeder frame with preview (ALWAYS)
+    if not HHT_PetFeedFrame then
+        HHT_PetFeeder_Initialize(MakeDraggable, CreateBackdrop)
+    end
+    if HHT_PetFeedFrame and HHT_PetIconButton and HHT_FoodIconButton then
+        -- Set preview pet icon
+        if HHT_PetIconButton.icon then
+            HHT_PetIconButton.icon:SetTexture("Interface\\Icons\\Ability_Hunter_Pet_Wolf")
+        end
+        -- Set preview food icon
+        if HHT_FoodIconButton.icon then
+            HHT_FoodIconButton.icon:SetTexture("Interface\\Icons\\INV_Misc_Food_94_Haunch")
+        end
+        HHT_PetFeedFrame:Show()
+    end
+    
+    -- Show Warning frames with preview (ALWAYS - force show both warnings)
+    if not HHT_WarningFrame then
+        -- Create warning frame if not exists (from Warnings.lua)
+        if HHT_CreateWarningFrame then
+            HHT_CreateWarningFrame()
+        end
+    end
+    if HHT_TrueshotIcon and HHT_AspectIcon and HHT_WarningFrame then
+        -- Show Trueshot warning (missing)
+        HHT_TrueshotIcon:SetTexture("Interface\\Icons\\Ability_TrueShot")
+        HHT_TrueshotIcon:SetAlpha(1.0)
+        -- Show Aspect warning (wrong)
+        HHT_AspectIcon:SetTexture("Interface\\Icons\\Ability_Mount_WhiteTiger")
+        HHT_AspectIcon:SetAlpha(1.0)
+        HHT_WarningFrame:Show()
+    end
+    
+    -- Show Tranq frame with preview (ALWAYS)
+    if HHT_Tranq_ShowPreview then
+        HHT_Tranq_ShowPreview()
+    end
+
+    -- Show Proc Frame with preview (ALWAYS)
+    if HHT_ProcFrame then
+        -- Force-show with dummy proc data so player can see frame position/size
+        -- Override ProcState directly via the public update function
+        if HHT_ProcFrame_ShowPreview then
+            HHT_ProcFrame_ShowPreview()
+        end
+    end
+end
+
+local function HideConfigPreview()
+    HHT_Core.previewMode = false
+    
+    -- PERFORMANCE: Check if OnUpdate should be disabled
+    HHT_AutoShot_CheckOnUpdateState()
+    
+    -- Hide castbar if not casting
+    local castFrame = HHT_Castbar_GetFrame()
+    if castFrame and not HHT_Core.isCasting then
+        castFrame:Hide()
+    end
+    HHT_Castbar_HideBarText()
+    
+    -- Hide buff icons (update will show real buffs)
+    if hasteFrame then
+        hasteFrame:SetAlpha(0)
+    end
+    
+    -- Clear ammo preview
+    if ammoFrame then
+        ammoFrame.icon:SetTexture("")
+        ammoFrame.text:SetText("")
+    end
+    
+    -- Clear pet feeder preview
+    if HHT_PetFeedFrame and HHT_PetIconButton and HHT_FoodIconButton then
+        if HHT_PetIconButton.icon then
+            HHT_PetIconButton.icon:SetTexture("")
+        end
+        if HHT_FoodIconButton.icon then
+            HHT_FoodIconButton.icon:SetTexture("")
+        end
+    end
+    
+    -- Clear warning icons preview
+    if HHT_TrueshotIcon and HHT_AspectIcon then
+        HHT_TrueshotIcon:SetTexture("")
+        HHT_TrueshotIcon:SetAlpha(0)
+        HHT_AspectIcon:SetTexture("")
+        HHT_AspectIcon:SetAlpha(0)
+        if HHT_WarningFrame then
+            HHT_WarningFrame:Hide()
+        end
+    end
+    
+    -- Hide Tranq frame preview
+    if HHT_Tranq_HidePreview then
+        HHT_Tranq_HidePreview()
+    end
+
+    -- Hide Proc Frame preview
+    if HHT_ProcFrame_HidePreview then
+        HHT_ProcFrame_HidePreview()
+    end
+
+    -- Trigger normal updates to show real data
+    UpdateAmmoDisplay()
+    HHT_PetFeeder_UpdateDisplay()
+    if HHT_UpdateWarningDisplay then
+        HHT_UpdateWarningDisplay()
+    end
+end
+
+-- ============ Config Frame Creation ============
+local function CreateConfigFrame()
+    -- Create Config Frame
+    configFrame = CreateFrame("Frame", "HamingwaysHunterToolsConfigFrame", UIParent)
+    configFrame:SetWidth(320)
+    configFrame:SetHeight(650)
+    configFrame:SetPoint("CENTER", UIParent, "CENTER")
+    configFrame:SetFrameStrata("DIALOG")
+    configFrame:SetBackdrop({
+        bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
+        edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
+        tile = true, tileSize = 32, edgeSize = 32,
+        insets = { left = 11, right = 12, top = 12, bottom = 11 }
+    })
+    configFrame:EnableMouse(true)
+    configFrame:SetMovable(true)
+    configFrame:RegisterForDrag("LeftButton")
+    configFrame:SetScript("OnDragStart", function() this:StartMoving() end)
+    configFrame:SetScript("OnDragStop", function() this:StopMovingOrSizing() end)
+    configFrame:Hide()
+    
+    -- Color Picker Function (defined before tabs)
+    local function CreateColorButton(name, label, yPos, colorKey, parent)
+        local btn = CreateFrame("Button", name, parent or configFrame)
+        btn:SetWidth(100)
+        btn:SetHeight(20)
+        btn:SetPoint("TOPLEFT", 20, yPos)
+        
+        local btnText = btn:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        btnText:SetPoint("LEFT", btn, "LEFT", 0, 0)
+        btnText:SetText(label)
+        
+        local colorSwatch = btn:CreateTexture(nil, "OVERLAY")
+        colorSwatch:SetWidth(16)
+        colorSwatch:SetHeight(16)
+        colorSwatch:SetPoint("RIGHT", btn, "RIGHT", 0, 0)
+        colorSwatch:SetTexture("Interface\\BUTTONS\\WHITE8X8")
+        
+        btn.colorSwatch = colorSwatch
+        btn.colorKey = colorKey
+        
+        btn:SetScript("OnClick", function()
+            local cfg = GetConfig()
+            local color = cfg[colorKey]
+            ColorPickerFrame.func = function()
+                local r, g, b = ColorPickerFrame:GetColorRGB()
+                cfg[colorKey].r = r
+                cfg[colorKey].g = g
+                cfg[colorKey].b = b
+                colorSwatch:SetVertexColor(r, g, b)
+                ApplyFrameSettings()
+            end
+            ColorPickerFrame.hasOpacity = false
+            ColorPickerFrame.previousValues = {color.r, color.g, color.b}
+            ColorPickerFrame:SetColorRGB(color.r, color.g, color.b)
+            ColorPickerFrame:Show()
+        end)
+        
+        return btn
+    end
+    
+    -- Tab system
+    local tabs = {}
+    local tabContents = {}
+    local activeTab = 1
+    
+    local function ShowTab(tabIndex)
+        for i, content in ipairs(tabContents) do
+            if i == tabIndex then
+                content:Show()
+            else
+                content:Hide()
+            end
+        end
+        for i, tab in ipairs(tabs) do
+            if i == tabIndex then
+                tab:SetBackdropColor(0.3, 0.3, 0.3, 1)
+            else
+                tab:SetBackdropColor(0.1, 0.1, 0.1, 1)
+            end
+        end
+        activeTab = tabIndex
+    end
+    
+    -- Create tabs (split into 3 rows: 4+4+3)
+    local tabNames = {"AutoShot", "Castbar", "Buffs", "Ammunition", "Statistik", "Pet Feeder", "Melee", "Warnings", "Tranq", "Appearance", "Proc Frame"}
+    local tabWidthRow1 = (320 - 32) / 4  -- First 4 tabs
+    local tabWidthRow2 = (320 - 32) / 4  -- Next 4 tabs
+    local tabWidthRow3 = (320 - 32) / 3  -- Last 3 tabs (was 2, now 3)
+    
+    for i, name in ipairs(tabNames) do
+        local tabIndex = i  -- Create local copy for closure
+        local tab = CreateFrame("Button", nil, configFrame)
+        
+        -- Position tabs in 3 rows inside frame, below title
+        if i <= 4 then
+            -- First row (tabs 1-4)
+            tab:SetWidth(tabWidthRow1)
+            tab:SetHeight(24)
+            tab:SetPoint("TOPLEFT", configFrame, "TOPLEFT", 16 + (i - 1) * tabWidthRow1, -40)
+        elseif i <= 8 then
+            -- Second row (tabs 5-8)
+            tab:SetWidth(tabWidthRow2)
+            tab:SetHeight(24)
+            tab:SetPoint("TOPLEFT", configFrame, "TOPLEFT", 16 + (i - 5) * tabWidthRow2, -64)
+        else
+            -- Third row (tabs 9-11)
+            tab:SetWidth(tabWidthRow3)
+            tab:SetHeight(24)
+            tab:SetPoint("TOPLEFT", configFrame, "TOPLEFT", 16 + (i - 9) * tabWidthRow3, -88)
+        end
+        
+        tab:SetFrameStrata("DIALOG")
+        tab:SetFrameLevel(configFrame:GetFrameLevel() + 2)
+        tab:EnableMouse(true)
+        tab:SetBackdrop({
+            bgFile = "Interface\\BUTTONS\\WHITE8X8",
+            edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+            edgeSize = 8,
+            insets = { left = 2, right = 2, top = 2, bottom = 2 }
+        })
+        tab:SetBackdropColor(0.1, 0.1, 0.1, 1)
+        tab:SetBackdropBorderColor(1, 1, 1, 1)
+        
+        local text = tab:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        text:SetPoint("CENTER", 0, 0)
+        text:SetText(name)
+        
+        tab:SetScript("OnClick", function()
+            ShowTab(tabIndex)
+        end)
+        
+        tab:SetScript("OnEnter", function()
+            this:SetBackdropBorderColor(1, 1, 0, 1)
+        end)
+        
+        tab:SetScript("OnLeave", function()
+            this:SetBackdropBorderColor(1, 1, 1, 1)
+        end)
+        
+        tab:Hide()  -- Hide initially
+        tabs[i] = tab
+        
+        -- Create content frame for this tab
+        local content = CreateFrame("Frame", nil, configFrame)
+        content:SetPoint("TOPLEFT", 16, -119)  -- Below title (15) + 3 rows of tabs (24*3) + spacing (8)
+        content:SetWidth(288)
+        content:SetHeight(476)  -- Reduced by 24px for 3rd tab row
+        content:SetFrameLevel(configFrame:GetFrameLevel() + 1)
+        content:EnableMouse(false)
+        content:Hide()
+        tabContents[i] = content
+    end
+    
+    -- Tab 1: AutoShot Timer settings
+    local tab1 = tabContents[1]
+    
+    -- Title
+    local title = configFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    title:SetPoint("TOP", 0, -15)
+    title:SetText("|cFFABD473Hamingway's |r|cFFFFFF00HunterTools|r")
+    
+    -- AutoShot Timer Title
+    local autoShotTitle = tab1:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    autoShotTitle:SetPoint("TOP", 0, -10)
+    autoShotTitle:SetText("AutoShot Timer Settings")
+    
+    -- Show AutoShot Timer Checkbox (first option)
+    local showAutoShotCheck = CreateCheckbox("HamingwaysHunterToolsShowAutoShotCheck", tab1, "Show AutoShot Timer", -40)
+    showAutoShotCheck:SetScript("OnClick", function()
+        HamingwaysHunterToolsDB.showAutoShotTimer = this:GetChecked() and true or false
+        UpdateFrameVisibility()
+    end)
+    
+    -- Show Only In Combat Checkbox
+    local combatCheck = CreateCheckbox("HamingwaysHunterToolsCombatCheck", tab1, "Show only in combat", -70)
+    combatCheck:SetScript("OnClick", function()
+        HamingwaysHunterToolsDB.showOnlyInCombat = this:GetChecked() and true or false
+        UpdateFrameVisibility()
+    end)
+    
+    -- Show Timer Text Checkbox
+    local timerCheck = CreateCheckbox("HamingwaysHunterToolsTimerCheck", tab1, "Show timer text", -100)
+    timerCheck:SetScript("OnClick", function()
+        HamingwaysHunterToolsDB.showTimerText = this:GetChecked() and true or false
+        -- Immediately update preview if config is open
+        if HHT_Core.previewMode then
+            HideConfigPreview()
+            ShowConfigPreview()
+        end
+    end)
+    
+    -- Frame Width Slider
+    local widthSlider = CreateSlider("HamingwaysHunterToolsWidthSlider", tab1, "Width", -145, 100, 400, 10, function()
+        local val = this:GetValue()
+        HamingwaysHunterToolsDB.frameWidth = val
+        getglobal(this:GetName().."Text"):SetText("Width: "..val)
+        ApplyFrameSettings()
+    end)
+    
+    -- Frame Height Slider
+    local heightSlider = CreateSlider("HamingwaysHunterToolsHeightSlider", tab1, "Höhe", -190, 10, 40, 2, function()
+        local val = this:GetValue()
+        HamingwaysHunterToolsDB.frameHeight = val
+        getglobal(this:GetName().."Text"):SetText("Height: "..val)
+        ApplyFrameSettings()
+    end)
+    
+    -- Color buttons for Tab 1
+    local reloadColorBtn = CreateColorButton("HamingwaysHunterToolsReloadColor", "Reload:", -235, "reloadColor", tab1)
+    local aimingColorBtn = CreateColorButton("HamingwaysHunterToolsAimingColor", "Aiming:", -265, "aimingColor", tab1)
+    local bgColorBtn1 = CreateColorButton("HamingwaysHunterToolsBgColor1", "Hintergrund:", -295, "bgColor", tab1)
+    
+    -- Background Opacity for Tab 1
+    local opacitySlider = CreateSlider("HamingwaysHunterToolsOpacitySlider", tab1, "BG Opacity", -340, 0, 1, 0.1, function()
+        local val = this:GetValue()
+        HamingwaysHunterToolsDB.bgOpacity = val
+        getglobal(this:GetName().."Text"):SetText(string.format("BG Opacity: %.1f", val))
+        ApplyFrameSettings()
+    end)
+    
+    -- Auto-Switch Melee/Ranged based on range
+    local autoSwitchMeleeCheck = CreateCheckbox("HamingwaysHunterToolsAutoSwitchCheck", tab1, "Auto-switch to Melee Timer at melee range", -385)
+    autoSwitchMeleeCheck:SetScript("OnClick", function()
+        HamingwaysHunterToolsDB.autoSwitchMeleeRanged = this:GetChecked() and true or false
+        InvalidateConfigCache()
+    end)
+    
+    -- Tab 2: Castbar settings
+    local tab2 = tabContents[2]
+    
+    -- Castbar Title
+    local castbarTitle = tab2:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    castbarTitle:SetPoint("TOP", 0, -10)
+    castbarTitle:SetText("Castbar Settings")
+    
+    -- Show Castbar Checkbox
+    local showCastbarCheck = CreateCheckbox("HamingwaysHunterToolsShowCastbarCheck", tab2, "Show Castbar", -40)
+    showCastbarCheck:SetScript("OnClick", function()
+        HamingwaysHunterToolsDB.showCastbar = this:GetChecked() and true or false
+        if not HamingwaysHunterToolsDB.showCastbar and castFrame then
+            castFrame:Hide()
+        end
+    end)
+    
+    -- Castbar Spacing Slider
+    local spacingSlider = CreateFrame("Slider", "HamingwaysHunterToolsSpacingSlider", tab2, "OptionsSliderTemplate")
+    spacingSlider:SetPoint("TOPLEFT", 10, -85)
+    spacingSlider:SetMinMaxValues(0, 20)
+    spacingSlider:SetValueStep(1)
+    spacingSlider:SetWidth(250)
+    getglobal(spacingSlider:GetName().."Low"):SetText("0")
+    getglobal(spacingSlider:GetName().."High"):SetText("20")
+    getglobal(spacingSlider:GetName().."Text"):SetText("Castbar Spacing")
+    spacingSlider:SetScript("OnValueChanged", function()
+        local val = this:GetValue()
+        HamingwaysHunterToolsDB.castbarSpacing = val
+        getglobal(this:GetName().."Text"):SetText("Castbar Spacing: "..val)
+        ApplyFrameSettings()
+    end)
+    
+    local castColorBtn = CreateColorButton("HamingwaysHunterToolsCastColor", "Cast Color:", -135, "castColor", tab2)
+    
+    -- Tab 3: Buff bar settings
+    local tab3 = tabContents[3]
+    
+    -- Buffs Title
+    local buffsTitle = tab3:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    buffsTitle:SetPoint("TOP", 0, -10)
+    buffsTitle:SetText("Buff Bar Settings")
+    
+    -- Show BuffBar Checkbox
+    local showBuffBarCheck = CreateCheckbox("HamingwaysHunterToolsShowBuffBarCheck", tab3, "Show BuffBar", -40)
+    showBuffBarCheck:SetScript("OnClick", function()
+        HamingwaysHunterToolsDB.showBuffBar = this:GetChecked() and true or false
+        if not HamingwaysHunterToolsDB.showBuffBar and hasteFrame then
+            hasteFrame:SetAlpha(0)
+        else
+            UpdateHasteBuffs()
+        end
+    end)
+    
+    -- Icon Size Slider
+    local iconSizeSlider = CreateFrame("Slider", "HamingwaysHunterToolsIconSizeSlider", tab3, "OptionsSliderTemplate")
+    iconSizeSlider:SetPoint("TOPLEFT", 10, -85)
+    iconSizeSlider:SetMinMaxValues(16, 48)
+    iconSizeSlider:SetValueStep(2)
+    iconSizeSlider:SetWidth(250)
+    getglobal(iconSizeSlider:GetName().."Low"):SetText("16")
+    getglobal(iconSizeSlider:GetName().."High"):SetText("48")
+    getglobal(iconSizeSlider:GetName().."Text"):SetText("Icon Size")
+    iconSizeSlider:SetScript("OnValueChanged", function()
+        local val = this:GetValue()
+        HamingwaysHunterToolsDB.iconSize = val
+        getglobal(this:GetName().."Text"):SetText("Icon Size: "..val)
+        ApplyIconSize(val)
+    end)
+    
+    -- Tab 4: Ammunition settings
+    local tab4 = tabContents[4]
+    
+    -- Munition Title
+    local munitionTitle = tab4:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    munitionTitle:SetPoint("TOP", 0, -10)
+    munitionTitle:SetText("Ammunition Settings")
+    
+    -- Show Ammo Checkbox
+    local showAmmoCheck = CreateCheckbox("HamingwaysHunterToolsShowAmmoCheck", tab4, "Show ammunition", -40)
+    showAmmoCheck:SetScript("OnClick", function()
+        HamingwaysHunterToolsDB.showAmmo = this:GetChecked() and true or false
+        if ammoFrame then
+            if HamingwaysHunterToolsDB.showAmmo then
+                UpdateAmmoDisplay()
+            else
+                ammoFrame:Hide()
+            end
+        end
+    end)
+    
+    -- Ammo Icon Size Slider
+    local ammoIconSizeSlider = CreateFrame("Slider", "HamingwaysHunterToolsAmmoIconSizeSlider", tab4, "OptionsSliderTemplate")
+    ammoIconSizeSlider:SetPoint("TOPLEFT", 10, -85)
+    ammoIconSizeSlider:SetMinMaxValues(16, 64)
+    ammoIconSizeSlider:SetValueStep(2)
+    ammoIconSizeSlider:SetWidth(250)
+    getglobal(ammoIconSizeSlider:GetName().."Low"):SetText("16")
+    getglobal(ammoIconSizeSlider:GetName().."High"):SetText("64")
+    getglobal(ammoIconSizeSlider:GetName().."Text"):SetText("Ammo Icon Size")
+    ammoIconSizeSlider:SetScript("OnValueChanged", function()
+        local val = this:GetValue()
+        HamingwaysHunterToolsDB.ammoIconSize = val
+        getglobal(this:GetName().."Text"):SetText("Ammo Icon Size: "..val)
+        ApplyAmmoIconSize(val)
+    end)
+    
+    -- Tab 5: Statistics settings
+    local tab5 = tabContents[5]
+    
+    -- Statistics Title
+    local statisticsTitle = tab5:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    statisticsTitle:SetPoint("TOP", 0, -10)
+    statisticsTitle:SetText("Statistics Settings")
+    
+    -- Show Stats Checkbox
+    local showStatsCheck = CreateCheckbox("HamingwaysHunterToolsShowStatsCheck", tab5, "Show statistics", -40)
+    showStatsCheck:SetScript("OnClick", function()
+        HamingwaysHunterToolsDB.showStats = this:GetChecked() and true or false
+        UpdateStatsDisplay()
+    end)
+    
+    -- Auto Reset Stats Checkbox
+    local autoResetStatsCheck = CreateCheckbox("HamingwaysHunterToolsAutoResetStatsCheck", tab5, "Auto reset stats", -70)
+    autoResetStatsCheck:SetScript("OnClick", function()
+        HamingwaysHunterToolsDB.autoResetStats = this:GetChecked() and true or false
+    end)
+    
+    -- Stats Font Size Slider
+    local statsFontSlider = CreateFrame("Slider", "HamingwaysHunterToolsStatsFontSlider", tab5, "OptionsSliderTemplate")
+    statsFontSlider:SetPoint("TOPLEFT", 10, -115)
+    statsFontSlider:SetMinMaxValues(8, 16)
+    statsFontSlider:SetValueStep(1)
+    statsFontSlider:SetWidth(250)
+    getglobal(statsFontSlider:GetName().."Low"):SetText("8")
+    getglobal(statsFontSlider:GetName().."High"):SetText("16")
+    getglobal(statsFontSlider:GetName().."Text"):SetText("Font Size")
+    statsFontSlider:SetScript("OnValueChanged", function()
+        local val = this:GetValue()
+        HamingwaysHunterToolsDB.statsFontSize = val
+        getglobal(this:GetName().."Text"):SetText("Font Size: "..val)
+        if statsFrame then
+            local fontName = "GameFontNormalSmall"
+            if val >= 14 then fontName = "GameFontNormal" end
+            if statsFrame.avgText then statsFrame.avgText:SetFontObject(fontName) end
+            if statsFrame.minText then statsFrame.minText:SetFontObject(fontName) end
+            if statsFrame.maxText then statsFrame.maxText:SetFontObject(fontName) end
+            if statsFrame.lastText then statsFrame.lastText:SetFontObject(fontName) end
+            if statsFrame.countText then statsFrame.countText:SetFontObject(fontName) end
+            if statsFrame.skippedText then statsFrame.skippedText:SetFontObject(fontName) end
+            if statsFrame.delayedText then statsFrame.delayedText:SetFontObject(fontName) end
+        end
+    end)
+    
+    -- Reset Stats Button
+    local resetStatsBtn = CreateFrame("Button", nil, tab5, "UIPanelButtonTemplate")
+    resetStatsBtn:SetWidth(120)
+    resetStatsBtn:SetHeight(22)
+    resetStatsBtn:SetPoint("TOPLEFT", 20, -240)
+    resetStatsBtn:SetText("Reset Stats")
+    resetStatsBtn:SetScript("OnClick", function()
+        ResetStats()
+    end)
+    
+    -- Info text
+    local statsInfo = tab5:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    statsInfo:SetPoint("TOPLEFT", 10, -170)
+    statsInfo:SetWidth(270)
+    statsInfo:SetJustifyH("LEFT")
+    statsInfo:SetText("Measures the reaction time between Auto-Shot and Cast-Start (Aimed Shot, Multi-Shot, etc.). Right-click to reset.")
+    statsInfo:SetTextColor(1, 0.82, 0, 1)
+    
+    -- ========== Tab 6: Pet Feeder ==========
+    local tab6 = tabContents[6]
+    
+    -- Pet Feeder Title
+    local petFeederTitle = tab6:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    petFeederTitle:SetPoint("TOP", 0, -10)
+    petFeederTitle:SetText("Pet Feeder Settings")
+    
+    -- Show Pet Feeder
+    local showPetFeederCheck = CreateCheckbox("HamingwaysHunterToolsShowPetFeederCheck", tab6, "Show Pet Feeder", -40)
+    showPetFeederCheck:SetScript("OnClick", function()
+        HamingwaysHunterToolsDB.showPetFeeder = this:GetChecked() and true or false
+        UpdateFrameVisibility()
+        if HamingwaysHunterToolsDB.showPetFeeder then
+            HHT_PetFeeder_UpdateDisplay()
+        end
+    end)
+    
+    -- Auto Feed Pet
+    local autoFeedCheck = CreateCheckbox("HamingwaysHunterToolsAutoFeedCheck", tab6, "Auto feed pet when unhappy", -70)
+    autoFeedCheck:SetScript("OnClick", function()
+        HamingwaysHunterToolsDB.autoFeedPet = this:GetChecked() and true or false
+    end)
+    
+    -- Feed on Click
+    local feedOnClickCheck = CreateCheckbox("HamingwaysHunterToolsFeedOnClickCheck", tab6, "Feed on left-click food icon", -100)
+    feedOnClickCheck:SetScript("OnClick", function()
+        HamingwaysHunterToolsDB.feedOnClick = this:GetChecked() and true or false
+    end)
+    
+    -- Pet Feeder Icon Size Slider
+    local petFeederIconSlider = CreateFrame("Slider", "HamingwaysHunterToolsPetFeederIconSlider", tab6, "OptionsSliderTemplate")
+    petFeederIconSlider:SetPoint("TOPLEFT", 10, -145)
+    petFeederIconSlider:SetMinMaxValues(24, 64)
+    petFeederIconSlider:SetValueStep(2)
+    petFeederIconSlider:SetWidth(250)
+    getglobal(petFeederIconSlider:GetName().."Low"):SetText("24")
+    getglobal(petFeederIconSlider:GetName().."High"):SetText("64")
+    getglobal(petFeederIconSlider:GetName().."Text"):SetText("Icon Size")
+    petFeederIconSlider:SetScript("OnValueChanged", function()
+        local val = this:GetValue()
+        HamingwaysHunterToolsDB.petFeederIconSize = val
+        getglobal(this:GetName().."Text"):SetText("Icon Size: "..val)
+        ApplyFrameSettings()
+    end)
+    
+    -- Info Text
+    local petFeederInfo = tab6:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    petFeederInfo:SetPoint("TOPLEFT", 20, -200)
+    petFeederInfo:SetWidth(270)
+    petFeederInfo:SetJustifyH("LEFT")
+    petFeederInfo:SetText("The Pet Feeder shows your pet portrait and selected food. Background color indicates pet happiness:\n\n|cff00ff00Green|r = Happy\n|cffffff00Yellow|r = Content\n|cffff0000Red|r = Unhappy\n\nLeft-click food icon to feed, right-click to select food. Food your pet rejects is automatically blacklisted.")
+    
+    -- Reset Blacklist Button
+    local resetBlacklistBtn = CreateFrame("Button", nil, tab6, "UIPanelButtonTemplate")
+    resetBlacklistBtn:SetWidth(200)
+    resetBlacklistBtn:SetHeight(24)
+    resetBlacklistBtn:SetPoint("TOPLEFT", 20, -340)
+    resetBlacklistBtn:SetText("Reset Blacklisted Food")
+    resetBlacklistBtn:SetScript("OnClick", function()
+        if UnitExists("pet") then
+            local petName = UnitName("pet")
+            if HamingwaysHunterToolsDB.petFoodBlacklist and HamingwaysHunterToolsDB.petFoodBlacklist[petName] then
+                HamingwaysHunterToolsDB.petFoodBlacklist[petName] = {}
+                DEFAULT_CHAT_FRAME:AddMessage("|cFFABD473Hamingway's HunterTools:|r Blacklist cleared for " .. petName, 0.67, 0.83, 0.45)
+                HHT_PetFeeder_UpdateDisplay()
+            else
+                DEFAULT_CHAT_FRAME:AddMessage("|cFFABD473Hamingway's HunterTools:|r No blacklisted food for " .. petName, 1, 1, 0)
+            end
+        end
+    end)
+    
+    -- Store button reference for visibility updates
+    tab6.resetBlacklistBtn = resetBlacklistBtn
+    
+    -- All-in-One Macro Info Box
+    local macroTitle = tab6:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    macroTitle:SetPoint("TOPLEFT", 20, -385)
+    macroTitle:SetText("|cFFFFD100All-in-One Macro|r")
+    
+    local macroInfo = tab6:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    macroInfo:SetPoint("TOPLEFT", 20, -405)
+    macroInfo:SetWidth(270)
+    macroInfo:SetJustifyH("LEFT")
+    macroInfo:SetText("Smart pet management based on pet state:\n|cff00ff00Pet dead|r = Revive\n|cff00ff00Pet unhappy|r = Feed\n|cff00ff00Pet happy|r = Dismiss\n|cff00ff00No pet|r = Call")
+    macroInfo:SetTextColor(0.8, 0.8, 0.8, 1)
+    
+    -- Copyable EditBox for Macro Text
+    local macroEditBox = CreateFrame("EditBox", nil, tab6, "InputBoxTemplate")
+    macroEditBox:SetPoint("TOPLEFT", 30, -470)
+    macroEditBox:SetWidth(250)
+    macroEditBox:SetHeight(30)
+    macroEditBox:SetAutoFocus(false)
+    macroEditBox:SetText("/script HamingwaysHunterTools_API.SmartPetAction()")
+    macroEditBox:SetScript("OnEscapePressed", function()
+        this:ClearFocus()
+    end)
+    macroEditBox:SetScript("OnEnterPressed", function()
+        this:ClearFocus()
+    end)
+    macroEditBox:SetScript("OnEditFocusGained", function()
+        this:HighlightText()
+    end)
+    
+    -- ========== Tab 7: Melee Timer ==========
+    local tab7 = tabContents[7]
+    
+    -- Melee Timer Title
+    local meleeTitle = tab7:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    meleeTitle:SetPoint("TOP", 0, -10)
+    meleeTitle:SetText("Melee Swing Timer")
+    
+    -- Use Instead of AutoShot
+    local meleeInsteadCheck = CreateCheckbox("HamingwaysHunterToolsMeleeInsteadCheck", tab7, "Use instead of AutoShot timer", -40)
+    meleeInsteadCheck:SetScript("OnClick", function()
+        HamingwaysHunterToolsDB.meleeTimerInsteadOfAutoShot = this:GetChecked() and true or false
+        InvalidateConfigCache()
+    end)
+    
+    -- Melee Bar Color
+    local meleeColorBtn = CreateColorButton("HamingwaysHunterToolsMeleeColor", "Melee Farbe:", -80, "meleeColor", tab7)
+    
+    -- Info Text
+    local meleeInfo = tab7:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    meleeInfo:SetPoint("TOPLEFT", 20, -125)
+    meleeInfo:SetWidth(270)
+    meleeInfo:SetJustifyH("LEFT")
+    meleeInfo:SetText("The Melee Swing Timer tracks your melee attacks (detected via combat log).\n\n|cffFFFFFFOptions:|r\n\n|cff00ff00Instead of AutoShot|r - Always shows melee, never ranged\n\n|cff00ff00Auto-switch|r - (Tab 1) Switches between melee/ranged based on target distance\n\n|cffFFFF00Note:|r Melee timer visibility and combat behavior are bound to AutoShot Timer settings. Works best with consistent melee attacks.")
+    
+    -- ========== Tab 8: Warnings (Trueshot + Aspect) ==========
+    local tab8 = tabContents[8]
+    
+    local warningsTitle = tab8:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    warningsTitle:SetPoint("TOP", 0, -10)
+    warningsTitle:SetText("Warnings")
+    
+    -- Trueshot Aura Section
+    local trueshotLabel = tab8:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    trueshotLabel:SetPoint("TOPLEFT", 20, -45)
+    trueshotLabel:SetText("|cFFFFD700Trueshot Aura:|r")
+    
+    local autoTrueshotCheck = CreateCheckbox("HamingwaysHunterToolsAutoTrueshotCheck", tab8, "Auto-cast on target change", -65)
+    autoTrueshotCheck:SetScript("OnClick", function()
+        HamingwaysHunterToolsDB.autoTrueshotAura = this:GetChecked() and true or false
+        if HHT_UpdateWarningDisplay then HHT_UpdateWarningDisplay() end
+    end)
+    
+    local showTrueshotWarningCheck = CreateCheckbox("HamingwaysHunterToolsShowTrueshotWarningCheck", tab8, "Show warning icon", -90)
+    showTrueshotWarningCheck:SetScript("OnClick", function()
+        HamingwaysHunterToolsDB.showTrueshotWarning = this:GetChecked() and true or false
+        if HHT_UpdateWarningDisplay then HHT_UpdateWarningDisplay() end
+    end)
+    
+    -- Aspect Tracking Section
+    local aspectLabel = tab8:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    aspectLabel:SetPoint("TOPLEFT", 20, -125)
+    aspectLabel:SetText("|cFF00FF00Aspect Tracking:|r")
+    
+    local aspectTrackingCheck = CreateCheckbox("HamingwaysHunterToolsAspectTrackingCheck", tab8, "Enable aspect tracking", -145)
+    aspectTrackingCheck:SetScript("OnClick", function()
+        HamingwaysHunterToolsDB.aspectTracking = this:GetChecked() and true or false
+        if HHT_UpdateWarningDisplay then HHT_UpdateWarningDisplay() end
+    end)
+    
+    local showAspectWarningCheck = CreateCheckbox("HamingwaysHunterToolsShowAspectWarningCheck", tab8, "Show warning icon", -170)
+    showAspectWarningCheck:SetScript("OnClick", function()
+        HamingwaysHunterToolsDB.showAspectWarning = this:GetChecked() and true or false
+        if HHT_UpdateWarningDisplay then HHT_UpdateWarningDisplay() end
+    end)
+    
+    -- Main Aspect Dropdown
+    local aspectDropdownLabel = tab8:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    aspectDropdownLabel:SetPoint("TOPLEFT", 20, -200)
+    aspectDropdownLabel:SetText("Main Aspect:")
+    
+    local aspectDropdown = CreateFrame("Button", "HamingwaysHunterToolsAspectDropdown", tab8, "UIDropDownMenuTemplate")
+    aspectDropdown:SetPoint("TOPLEFT", 15, -215)
+    UIDropDownMenu_SetWidth(220, aspectDropdown)
+    
+    local aspectDropdownText = getglobal(aspectDropdown:GetName().."Text")
+    aspectDropdownText:SetText("Aspect of the Hawk")
+    
+    UIDropDownMenu_Initialize(aspectDropdown, function()
+        local aspects = {"Aspect of the Hawk", "Aspect of the Monkey", "Aspect of the Cheetah", "Aspect of the Pack", "Aspect of the Wild", "Aspect of the Beast"}
+        for _, aspect in ipairs(aspects) do
+            local info = {}
+            info.text = aspect
+            info.arg1 = aspect  -- Store aspect in info table
+            info.func = function()
+                local selectedAspect = this.arg1 or info.arg1  -- Get from button or info
+                if selectedAspect then
+                    HamingwaysHunterToolsDB.mainAspect = selectedAspect
+                    local dropdownText = getglobal("HamingwaysHunterToolsAspectDropdownText")
+                    if dropdownText then
+                        dropdownText:SetText(selectedAspect)
+                    end
+                    DEFAULT_CHAT_FRAME:AddMessage("Aspect changed to: " .. selectedAspect)
+                    InvalidateConfigCache()  -- Force config cache refresh
+                    if HHT_UpdateWarningDisplay then 
+                        HHT_UpdateWarningDisplay() 
+                    end
+                end
+            end
+            UIDropDownMenu_AddButton(info)
+        end
+    end)
+    
+    -- Icon Size Slider
+    local warningIconSizeSlider = CreateFrame("Slider", "HamingwaysHunterToolsWarningIconSizeSlider", tab8, "OptionsSliderTemplate")
+    warningIconSizeSlider:SetPoint("TOPLEFT", 10, -270)
+    warningIconSizeSlider:SetMinMaxValues(24, 64)
+    warningIconSizeSlider:SetValueStep(4)
+    warningIconSizeSlider:SetWidth(250)
+    getglobal(warningIconSizeSlider:GetName().."Low"):SetText("24")
+    getglobal(warningIconSizeSlider:GetName().."High"):SetText("64")
+    getglobal(warningIconSizeSlider:GetName().."Text"):SetText("Icon Size")
+    warningIconSizeSlider:SetScript("OnValueChanged", function()
+        local val = this:GetValue()
+        HamingwaysHunterToolsDB.warningIconSize = val
+        getglobal(this:GetName().."Text"):SetText("Icon Size: "..val)
+        -- Update icon sizes immediately
+        if HHT_TrueshotIcon then
+            HHT_TrueshotIcon:SetWidth(val)
+            HHT_TrueshotIcon:SetHeight(val)
+        end
+        if HHT_AspectIcon then
+            HHT_AspectIcon:SetWidth(val)
+            HHT_AspectIcon:SetHeight(val)
+        end
+    end)
+    
+    -- Info Text
+    local warningsInfo = tab8:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    warningsInfo:SetPoint("TOPLEFT", 10, -320)
+    warningsInfo:SetWidth(270)
+    warningsInfo:SetJustifyH("LEFT")
+    warningsInfo:SetText("|cFFFFFFFFWarning icons blink when:|r\n\n• Trueshot Aura is missing\n• Wrong aspect is active\n\n|cffFFFF00Auto-cast:|r Only works out of combat")
+    warningsInfo:SetTextColor(0.8, 0.8, 0.8, 1)
+    
+    -- ========== Tab 9: Tranq Shot Announcer ==========
+    local tab9 = tabContents[9]
+    
+    local tranqTitle = tab9:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    tranqTitle:SetPoint("TOP", 0, -10)
+    tranqTitle:SetText("Tranq Shot Announcer")
+    
+    -- Enable Tranq Announcer
+    local enableTranqCheck = CreateCheckbox("HamingwaysHunterToolsEnableTranqCheck", tab9, "Enable Tranq Shot Announcer", -45)
+    enableTranqCheck:SetScript("OnClick", function()
+        HamingwaysHunterToolsDB.enableTranq = this:GetChecked() and true or false
+        if HamingwaysHunterToolsDB.enableTranq then
+            if HHT_Tranq_Enable then HHT_Tranq_Enable() end
+        else
+            if HHT_Tranq_Disable then HHT_Tranq_Disable() end
+        end
+    end)
+    
+    -- Channel Dropdown (Where to announce)
+    local channelLabel = tab9:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    channelLabel:SetPoint("TOPLEFT", 20, -75)
+    channelLabel:SetText("Announce to:")
+    
+    local channelDropdown = CreateFrame("Button", "HamingwaysHunterToolsChannelDropdown", tab9, "UIDropDownMenuTemplate")
+    channelDropdown:SetPoint("TOPLEFT", 15, -90)
+    UIDropDownMenu_SetWidth(220, channelDropdown)
+    
+    local channelDropdownText = getglobal(channelDropdown:GetName().."Text")
+    channelDropdownText:SetText("Raid")
+    
+    UIDropDownMenu_Initialize(channelDropdown, function()
+        local channels = {"Raid", "Party", "Say", "Yell", "None (addon-only)"}
+        for _, channel in ipairs(channels) do
+            local info = {}
+            info.text = channel
+            info.value = channel
+            info.func = function()
+                HamingwaysHunterToolsDB.tranqChannel = this.value
+                UIDropDownMenu_SetText(this.value, channelDropdown)
+            end
+            UIDropDownMenu_AddButton(info)
+        end
+    end)
+    
+    -- Quiver Compatibility
+    local quiverCompatCheck = CreateCheckbox("HamingwaysHunterToolsQuiverCompatCheck", tab9, "Quiver cross-compatibility", -135)
+    quiverCompatCheck:SetScript("OnClick", function()
+        HamingwaysHunterToolsDB.quiverCompat = this:GetChecked() and true or false
+    end)
+    
+    -- Custom Messages Section
+    local castMsgLabel = tab9:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    castMsgLabel:SetPoint("TOPLEFT", 20, -165)
+    castMsgLabel:SetText("Cast message:")
+    
+    local castMsgEditbox = CreateFrame("EditBox", "HamingwaysHunterToolsCastMsgEditbox", tab9, "InputBoxTemplate")
+    castMsgEditbox:SetPoint("TOPLEFT", 15, -180)
+    castMsgEditbox:SetWidth(250)
+    castMsgEditbox:SetHeight(20)
+    castMsgEditbox:SetAutoFocus(false)
+    castMsgEditbox:SetText("Tranq Shot -> %t")
+    castMsgEditbox.isUpdating = false
+    castMsgEditbox:SetScript("OnTextChanged", function()
+        if not this.isUpdating then
+            HamingwaysHunterToolsDB.tranqCastMsg = this:GetText()
+        end
+    end)
+    castMsgEditbox:SetScript("OnEscapePressed", function()
+        this:ClearFocus()
+    end)
+    
+    local missMsgLabel = tab9:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    missMsgLabel:SetPoint("TOPLEFT", 20, -210)
+    missMsgLabel:SetText("Miss message:")
+    
+    local missMsgEditbox = CreateFrame("EditBox", "HamingwaysHunterToolsMissMsgEditbox", tab9, "InputBoxTemplate")
+    missMsgEditbox:SetPoint("TOPLEFT", 15, -225)
+    missMsgEditbox:SetWidth(250)
+    missMsgEditbox:SetHeight(20)
+    missMsgEditbox:SetAutoFocus(false)
+    missMsgEditbox:SetText("Tranq Shot MISSED! -> %t")
+    missMsgEditbox.isUpdating = false
+    missMsgEditbox:SetScript("OnTextChanged", function()
+        if not this.isUpdating then
+            HamingwaysHunterToolsDB.tranqMissMsg = this:GetText()
+        end
+    end)
+    missMsgEditbox:SetScript("OnEscapePressed", function()
+        this:ClearFocus()
+    end)
+    
+    -- Info Text
+    local tranqInfo = tab9:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    tranqInfo:SetPoint("TOPLEFT", 10, -260)
+    tranqInfo:SetWidth(270)
+    tranqInfo:SetJustifyH("LEFT")
+    tranqInfo:SetText("|cFFFFFFFFTranq Shot Coordination:|r\n\n• Automatically detects your Tranq casts\n• Shows other hunters' cooldowns\n• Works with Quiver users (cross-compatible)\n\n|cffFFFF00%t|r = target name\n|cffFFFF00%p|r = player name\n\n|cffFF6600Note:|r This does NOT auto-detect Boss Frenzy. Use BigWigs/DBM or watch manually.")
+    tranqInfo:SetTextColor(0.8, 0.8, 0.8, 1)
+    
+    -- ========== Tab 10: Appearance ==========
+    local tab10 = tabContents[10]
+    
+    local appearanceTitle = tab10:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    appearanceTitle:SetPoint("TOP", 0, -10)
+    appearanceTitle:SetText("Appearance Settings")
+    
+    -- Lock Frames Checkbox
+    local lockCheck = CreateCheckbox("HamingwaysHunterToolsLockCheck", tab10, "Lock frames", -45)
+    lockCheck:SetScript("OnClick", function()
+        local locked = this:GetChecked() and true or false
+        HamingwaysHunterToolsDB.locked = locked
+        InvalidateConfigCache()
+        local mainFrame = getglobal("HamingwaysHunterToolsFrame")
+        if mainFrame then
+            mainFrame:EnableMouse(not locked)
+        end
+        local ammo = getglobal("HamingwaysHunterToolsAmmoFrame")
+        if ammo then
+            ammo:EnableMouse(not locked)
+        end
+        local stats = getglobal("HamingwaysHunterToolsStatsFrame")
+        if stats then
+            stats:EnableMouse(not locked)
+        end
+        if HHT_PetFeedFrame then
+            HHT_PetFeedFrame:EnableMouse(not locked)
+        end
+        if HHT_Tranq_UpdateLock then
+            HHT_Tranq_UpdateLock()
+        end
+        if HHT_WarningFrame then
+            HHT_WarningFrame:EnableMouse(not locked)
+        end
+        if HHT_ProcFrame_SetMouseEnabled then
+            HHT_ProcFrame_SetMouseEnabled(not locked)
+        end
+    end)
+    
+    -- Border Size Slider
+    local borderSlider = CreateSlider("HamingwaysHunterToolsBorderSlider", tab10, "Border", -90, 0, 20, 2, function()
+        local val = this:GetValue()
+        HamingwaysHunterToolsDB.borderSize = val
+        getglobal(this:GetName().."Text"):SetText("Border: "..val)
+        ApplyFrameSettings()
+        -- Update Tranq bars if they exist
+        if HHT_Tranq_UpdateBorder then
+            HHT_Tranq_UpdateBorder()
+        end
+    end)
+    
+    -- Bar Style Dropdown
+    local barStyleLabel = tab10:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    barStyleLabel:SetPoint("TOPLEFT", 20, -145)
+    barStyleLabel:SetText("Bar Texture:")
+    
+    local barStyleDropdown = CreateFrame("Button", "HamingwaysHunterToolsBarStyleDropdown", tab10, "UIDropDownMenuTemplate")
+    barStyleDropdown:SetPoint("TOPLEFT", 15, -160)
+    UIDropDownMenu_SetWidth(220, barStyleDropdown)
+    
+    local barStyleDropdownText = getglobal(barStyleDropdown:GetName().."Text")
+    barStyleDropdownText:SetText("Blizzard")
+    
+    UIDropDownMenu_Initialize(barStyleDropdown, function()
+        local styles = {
+            {name = "Blizzard", path = "Interface\\TargetingFrame\\UI-StatusBar"},
+            {name = "Smooth", path = "Interface\\Buttons\\WHITE8X8"},
+            {name = "Flat", path = "Interface\\BUTTONS\\WHITE8X8"}
+        }
+        for i, style in ipairs(styles) do
+            local info = {}
+            local styleName = style.name  -- Local copy for closure
+            local stylePath = style.path  -- Local copy for closure
+            info.text = styleName
+            info.value = stylePath
+            info.func = function()
+                HamingwaysHunterToolsDB.barStyle = stylePath
+                UIDropDownMenu_SetText(styleName, barStyleDropdown)
+                ApplyFrameSettings()
+                -- Update Tranq bars if they exist
+                if HHT_Tranq_UpdateBarStyle then
+                    HHT_Tranq_UpdateBarStyle()
+                end
+            end
+            UIDropDownMenu_AddButton(info)
+        end
+    end)
+    
+    -- Border Style Dropdown
+    local borderStyleLabel = tab10:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    borderStyleLabel:SetPoint("TOPLEFT", 20, -205)
+    borderStyleLabel:SetText("Border Style:")
+    
+    local borderStyleDropdown = CreateFrame("Button", "HamingwaysHunterToolsBorderStyleDropdown", tab10, "UIDropDownMenuTemplate")
+    borderStyleDropdown:SetPoint("TOPLEFT", 15, -220)
+    UIDropDownMenu_SetWidth(220, borderStyleDropdown)
+    
+    local borderStyleDropdownText = getglobal(borderStyleDropdown:GetName().."Text")
+    borderStyleDropdownText:SetText("Dialog")
+    
+    UIDropDownMenu_Initialize(borderStyleDropdown, function()
+        local styles = {
+            {name = "Tooltip", path = "Interface\\Tooltips\\UI-Tooltip-Border"},
+            {name = "Dialog", path = "Interface\\DialogFrame\\UI-DialogBox-Border"},
+            {name = "Simple", path = "Interface\\BUTTONS\\WHITE8X8"}
+        }
+        for i, style in ipairs(styles) do
+            local info = {}
+            local styleName = style.name  -- Local copy for closure
+            local stylePath = style.path  -- Local copy for closure
+            info.text = styleName
+            info.value = stylePath
+            info.func = function()
+                HamingwaysHunterToolsDB.borderStyle = stylePath
+                UIDropDownMenu_SetText(styleName, borderStyleDropdown)
+                ApplyFrameSettings()
+                -- Update Tranq bars if they exist
+                if HHT_Tranq_UpdateBorder then
+                    HHT_Tranq_UpdateBorder()
+                end
+            end
+            UIDropDownMenu_AddButton(info)
+        end
+    end)
+    
+    -- Info Text
+    local appearanceInfo = tab10:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    appearanceInfo:SetPoint("TOPLEFT", 10, -280)
+    appearanceInfo:SetWidth(270)
+    appearanceInfo:SetJustifyH("LEFT")
+    appearanceInfo:SetText("|cFFFFFFFFAppearance Settings:|r\n\n• |cffFFFF00Lock frames|r prevents accidental dragging\n• |cffFFFF00Border size|r affects all frames\n• |cffFFFF00Bar Texture|r applies to all timer bars\n• |cffFFFF00Border Style|r changes frame borders\n\nChanges apply immediately to all bars:\nAutoShot, Castbar, Melee, Tranq")
+    appearanceInfo:SetTextColor(0.8, 0.8, 0.8, 1)
+    
+    -- Mode Selection (at end of appearance tab)
+    local modeLabel = tab10:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    modeLabel:SetPoint("TOPLEFT", 20, -395)
+    modeLabel:SetText("|cFFFFD100Detection Mode:|r")
+    
+    local modeDropdown = CreateFrame("Button", "HHT_ModeDropdown", tab10, "UIDropDownMenuTemplate")
+    modeDropdown:SetPoint("TOPLEFT", 10, -410)
+    UIDropDownMenu_SetWidth(150, modeDropdown)
+    
+    local modeDropdownText = getglobal(modeDropdown:GetName().."Text")
+    modeDropdownText:SetText("Auto (Detect)")
+    
+    UIDropDownMenu_Initialize(modeDropdown, function()
+        local modes = {
+            {text = "Auto (Detect)", value = "auto"},
+            {text = "Vanilla 1.12", value = "vanilla"},
+            {text = "SuperWoW", value = "superwow", disabled = not SUPERWOW_AVAILABLE}
+        }
+        for _, mode in ipairs(modes) do
+            local info = {}
+            info.text = mode.text
+            info.arg1 = mode.text  -- Store for callback
+            info.arg2 = mode.value  -- Store for callback
+            info.disabled = mode.disabled
+            info.func = function()
+                local selectedText = this.arg1 or info.arg1
+                local selectedValue = this.arg2 or info.arg2
+                
+                HamingwaysHunterToolsDB.forceMode = selectedValue
+                
+                -- Update dropdown text directly
+                local dropdownText = getglobal("HHT_ModeDropdownText")
+                if dropdownText then
+                    dropdownText:SetText(selectedText)
+                end
+                
+                -- Apply mode change
+                local success, msg = SetMode(selectedValue)
+                if success then
+                    DEFAULT_CHAT_FRAME:AddMessage("|cFF00FF00" .. msg)
+                else
+                    DEFAULT_CHAT_FRAME:AddMessage("|cFFFF6666Error: " .. msg .. "|r")
+                end
+                
+                -- Update status text
+                if modeStatus then
+                    local activeMode = HAS_SUPERWOW and "|cFF00FF00SuperWoW|r" or "|cFFFFFF00Vanilla|r"
+                    local availableText = SUPERWOW_AVAILABLE and "SuperWoW" or "Vanilla"
+                    modeStatus:SetText("|cFFAAAAAAActive:|r " .. activeMode .. "  |cFFAAAAAAAvailable:|r " .. availableText)
+                end
+                
+                InvalidateConfigCache()
+            end
+            UIDropDownMenu_AddButton(info)
+        end
+    end)
+    
+    -- Mode Status Text
+    local modeStatus = tab10:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    modeStatus:SetPoint("TOPLEFT", 20, -445)
+    modeStatus:SetWidth(250)
+    modeStatus:SetJustifyH("LEFT")
+    local activeMode = HAS_SUPERWOW and "|cFF00FF00SuperWoW|r" or "|cFFFFFF00Vanilla|r"
+    local availableText = SUPERWOW_AVAILABLE and "SuperWoW" or "Vanilla"
+    modeStatus:SetText("|cFFAAAAAAActive:|r " .. activeMode .. "  |cFFAAAAAAAvailable:|r " .. availableText)
+    
+    -- Close Button
+    local closeBtn = CreateFrame("Button", nil, configFrame, "UIPanelButtonTemplate")
+    closeBtn:SetWidth(80)
+    closeBtn:SetHeight(22)
+    closeBtn:SetPoint("BOTTOM", 0, 15)
+    closeBtn:SetText("Close")
+    closeBtn:SetScript("OnClick", function()
+        configFrame:Hide()
+    end)
+    
+    -- Version text (bottom left, visible in all tabs)
+    local versionText = configFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    versionText:SetPoint("BOTTOMLEFT", 15, 15)
+    versionText:SetText("v" .. VERSION)
+    versionText:SetTextColor(0.5, 0.5, 0.5, 1)
+    
+    -- Store references for OnShow handler
+    configFrame.showAutoShotCheck = showAutoShotCheck
+    configFrame.showCastbarCheck = showCastbarCheck
+    configFrame.showBuffBarCheck = showBuffBarCheck
+    configFrame.lockCheck = lockCheck
+    configFrame.combatCheck = combatCheck
+    configFrame.timerCheck = timerCheck
+    configFrame.aspectDropdown = aspectDropdown
+    configFrame.aspectDropdownText = aspectDropdownText
+    configFrame.widthSlider = widthSlider
+    configFrame.heightSlider = heightSlider
+    configFrame.borderSlider = borderSlider
+    configFrame.spacingSlider = spacingSlider
+    configFrame.iconSizeSlider = iconSizeSlider
+    configFrame.showAmmoCheck = showAmmoCheck
+    configFrame.ammoIconSizeSlider = ammoIconSizeSlider
+    configFrame.statsFontSlider = statsFontSlider
+    configFrame.showStatsCheck = showStatsCheck
+    configFrame.autoResetStatsCheck = autoResetStatsCheck
+    configFrame.opacitySlider = opacitySlider
+    configFrame.reloadColorBtn = reloadColorBtn
+    configFrame.aimingColorBtn = aimingColorBtn
+    configFrame.castColorBtn = castColorBtn
+    configFrame.bgColorBtn = bgColorBtn1
+    configFrame.showPetFeederCheck = showPetFeederCheck
+    configFrame.autoFeedCheck = autoFeedCheck
+    configFrame.feedOnClickCheck = feedOnClickCheck
+    configFrame.petFeederIconSlider = petFeederIconSlider
+    configFrame.autoSwitchMeleeCheck = autoSwitchMeleeCheck
+    configFrame.meleeInsteadCheck = meleeInsteadCheck
+    configFrame.meleeColorBtn = meleeColorBtn
+    configFrame.autoTrueshotCheck = autoTrueshotCheck
+    configFrame.showTrueshotWarningCheck = showTrueshotWarningCheck
+    configFrame.aspectTrackingCheck = aspectTrackingCheck
+    configFrame.showAspectWarningCheck = showAspectWarningCheck
+    configFrame.aspectDropdown = aspectDropdown
+    configFrame.warningIconSizeSlider = warningIconSizeSlider
+    configFrame.enableTranqCheck = enableTranqCheck
+    configFrame.channelDropdown = channelDropdown
+    configFrame.quiverCompatCheck = quiverCompatCheck
+    configFrame.castMsgEditbox = castMsgEditbox
+    configFrame.missMsgEditbox = missMsgEditbox
+    configFrame.lockCheck = lockCheck
+    configFrame.borderSlider = borderSlider
+    configFrame.barStyleDropdown = barStyleDropdown
+    configFrame.borderStyleDropdown = borderStyleDropdown
+    configFrame.modeDropdown = modeDropdown
+    configFrame.modeDropdownText = modeDropdownText
+    configFrame.modeStatus = modeStatus
+
+    -- ========== Tab 11: Proc Frame ==========
+    local tab11 = tabContents[11]
+
+    local procTitle = tab11:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    procTitle:SetPoint("TOP", 0, -10)
+    procTitle:SetText("Proc Frame")
+
+    -- Enable Proc Frame Checkbox
+    local enableProcCheck = CreateCheckbox("HamingwaysHunterToolsEnableProcCheck", tab11, "Enable Proc Frame", -45)
+    enableProcCheck:SetScript("OnClick", function()
+        HamingwaysHunterToolsDB.procFrameEnabled = this:GetChecked() and true or false
+        if HHT_ProcFrame_UpdateSettings then HHT_ProcFrame_UpdateSettings() end
+    end)
+
+    -- Show Always Checkbox (vs only when procs active)
+    local procShowAlwaysCheck = CreateCheckbox("HamingwaysHunterToolsProcShowAlwaysCheck", tab11, "Show always (dim when inactive)", -70)
+    procShowAlwaysCheck:SetScript("OnClick", function()
+        HamingwaysHunterToolsDB.procFrameShowAlways = this:GetChecked() and true or false
+        if HHT_ProcFrame_UpdateSettings then HHT_ProcFrame_UpdateSettings() end
+    end)
+
+    -- Lock and Load Section
+    local lnlLabel = tab11:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    lnlLabel:SetPoint("TOPLEFT", 20, -105)
+    lnlLabel:SetText("|cFF00CCFF Lock and Load:|r")
+
+    local lnlCheck = CreateCheckbox("HamingwaysHunterToolsProcLnlCheck", tab11, "Show Lock and Load proc", -125)
+    lnlCheck:SetScript("OnClick", function()
+        HamingwaysHunterToolsDB.procFrameLnlEnabled = this:GetChecked() and true or false
+        if HHT_ProcFrame_UpdateSettings then HHT_ProcFrame_UpdateSettings() end
+    end)
+
+    -- Experimental Ammo Section
+    local ammoLabel = tab11:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    ammoLabel:SetPoint("TOPLEFT", 20, -158)
+    ammoLabel:SetText("|cFFFF8800 Experimental Ammunition:|r")
+
+    local ammoCheck = CreateCheckbox("HamingwaysHunterToolsProcAmmoCheck", tab11, "Show Experimental Ammo proc", -178)
+    ammoCheck:SetScript("OnClick", function()
+        HamingwaysHunterToolsDB.procFrameAmmoEnabled = this:GetChecked() and true or false
+        if HHT_ProcFrame_UpdateSettings then HHT_ProcFrame_UpdateSettings() end
+    end)
+
+    -- Icon Size Slider
+    local procIconSizeSlider = CreateFrame("Slider", "HamingwaysHunterToolsProcIconSizeSlider", tab11, "OptionsSliderTemplate")
+    procIconSizeSlider:SetPoint("TOPLEFT", 10, -225)
+    procIconSizeSlider:SetMinMaxValues(24, 64)
+    procIconSizeSlider:SetValueStep(4)
+    procIconSizeSlider:SetWidth(250)
+    getglobal(procIconSizeSlider:GetName().."Low"):SetText("24")
+    getglobal(procIconSizeSlider:GetName().."High"):SetText("64")
+    getglobal(procIconSizeSlider:GetName().."Text"):SetText("Icon Size")
+    procIconSizeSlider:SetScript("OnValueChanged", function()
+        local val = this:GetValue()
+        HamingwaysHunterToolsDB.procFrameIconSize = val
+        getglobal(this:GetName().."Text"):SetText("Icon Size: "..val)
+        if HHT_ProcFrame_ApplyIconSize then HHT_ProcFrame_ApplyIconSize(val) end
+    end)
+
+    -- Info Text
+    local procInfo = tab11:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    procInfo:SetPoint("TOPLEFT", 10, -280)
+    procInfo:SetWidth(270)
+    procInfo:SetJustifyH("LEFT")
+    procInfo:SetText(
+        "|cFFFFFFFFProc Frame:|r Shows hunter procs from Turtle WoW 1.18.1 talents.\n\n" ..
+        "|cFF00CCFFLock and Load|r - Resets Aimed Shot CD on ranged crits (10 sec).\n\n" ..
+        "|cFFFF8800Experimental Ammo|r - 3 variants cycling after Aimed Shot.\n\n" ..
+        "|cFFFFFF00Requires SuperWoW.|r\n\n" ..
+        "Use |cFFFFFF00/hht proc scan|r while buffs are active to discover the buff textures " ..
+        "and update the constants in ProcFrame.lua."
+    )
+    procInfo:SetTextColor(0.8, 0.8, 0.8, 1)
+
+    -- Store references on configFrame for OnShow handler
+    configFrame.enableProcCheck      = enableProcCheck
+    configFrame.procShowAlwaysCheck  = procShowAlwaysCheck
+    configFrame.lnlCheck             = lnlCheck
+    configFrame.ammoCheck            = ammoCheck
+    configFrame.procIconSizeSlider   = procIconSizeSlider
+
+    -- Show first tab by default
+    ShowTab(1)
+    
+    -- Update config UI when shown
+    configFrame:SetScript("OnShow", function()
+        local cfg = GetConfig()
+        this.showAutoShotCheck:SetChecked(cfg.showAutoShotTimer)
+        this.showCastbarCheck:SetChecked(cfg.showCastbar)
+        this.showBuffBarCheck:SetChecked(cfg.showBuffBar)
+        this.combatCheck:SetChecked(cfg.showOnlyInCombat)
+        this.timerCheck:SetChecked(cfg.showTimerText)
+        this.widthSlider:SetValue(cfg.frameWidth)
+        this.heightSlider:SetValue(cfg.frameHeight)
+        this.spacingSlider:SetValue(cfg.castbarSpacing)
+        this.iconSizeSlider:SetValue(cfg.iconSize)
+        this.ammoIconSizeSlider:SetValue(cfg.ammoIconSize)
+        this.statsFontSlider:SetValue(cfg.statsFontSize)
+        this.showStatsCheck:SetChecked(cfg.showStats)
+        this.autoResetStatsCheck:SetChecked(cfg.autoResetStats)
+        this.showAmmoCheck:SetChecked(cfg.showAmmo)
+        this.opacitySlider:SetValue(cfg.bgOpacity)
+        this.reloadColorBtn.colorSwatch:SetVertexColor(cfg.reloadColor.r, cfg.reloadColor.g, cfg.reloadColor.b)
+        this.aimingColorBtn.colorSwatch:SetVertexColor(cfg.aimingColor.r, cfg.aimingColor.g, cfg.aimingColor.b)
+        this.castColorBtn.colorSwatch:SetVertexColor(cfg.castColor.r, cfg.castColor.g, cfg.castColor.b)
+        this.bgColorBtn.colorSwatch:SetVertexColor(cfg.bgColor.r, cfg.bgColor.g, cfg.bgColor.b)
+        this.showPetFeederCheck:SetChecked(cfg.showPetFeeder)
+        this.autoFeedCheck:SetChecked(cfg.autoFeedPet)
+        this.feedOnClickCheck:SetChecked(cfg.feedOnClick)
+        this.petFeederIconSlider:SetValue(cfg.petFeederIconSize or DEFAULT_PET_FEEDER_ICON_SIZE)
+        this.autoSwitchMeleeCheck:SetChecked(cfg.autoSwitchMeleeRanged)
+        this.meleeInsteadCheck:SetChecked(cfg.meleeTimerInsteadOfAutoShot)
+        this.meleeColorBtn.colorSwatch:SetVertexColor(cfg.meleeColor.r, cfg.meleeColor.g, cfg.meleeColor.b)
+        this.autoTrueshotCheck:SetChecked(cfg.autoTrueshotAura)
+        this.showTrueshotWarningCheck:SetChecked(cfg.showTrueshotWarning)
+        this.aspectTrackingCheck:SetChecked(cfg.aspectTracking)
+        this.showAspectWarningCheck:SetChecked(cfg.showAspectWarning)
+        this.warningIconSizeSlider:SetValue(cfg.warningIconSize or 36)
+        -- Set aspect dropdown text
+        if this.aspectDropdownText and cfg.mainAspect then
+            this.aspectDropdownText:SetText(cfg.mainAspect)
+        end
+        -- Tab 9: Tranq
+        this.enableTranqCheck:SetChecked(cfg.enableTranq)
+        this.quiverCompatCheck:SetChecked(cfg.quiverCompat)
+        if this.channelDropdown then
+            UIDropDownMenu_SetText(cfg.tranqChannel or "Raid", this.channelDropdown)
+        end
+        if this.castMsgEditbox then
+            this.castMsgEditbox.isUpdating = true
+            this.castMsgEditbox:SetText(cfg.tranqCastMsg or "Tranq Shot -> %t")
+            this.castMsgEditbox.isUpdating = false
+        end
+        if this.missMsgEditbox then
+            this.missMsgEditbox.isUpdating = true
+            this.missMsgEditbox:SetText(cfg.tranqMissMsg or "Tranq Shot MISSED! -> %t")
+            this.missMsgEditbox.isUpdating = false
+        end
+        -- Tab 10: Appearance
+        this.lockCheck:SetChecked(cfg.locked)
+        this.borderSlider:SetValue(cfg.borderSize)
+        if this.barStyleDropdown then
+            -- Find style name from path
+            local styleName = "Blizzard"
+            if cfg.barStyle == "Interface\\Buttons\\WHITE8X8" then
+                styleName = "Smooth"
+            elseif cfg.barStyle == "Interface\\BUTTONS\\WHITE8X8" then
+                styleName = "Flat"
+            end
+            UIDropDownMenu_SetText(styleName, this.barStyleDropdown)
+        end
+        if this.borderStyleDropdown then
+            -- Find border style name from path
+            local borderName = "Tooltip"
+            if cfg.borderStyle == "Interface\\DialogFrame\\UI-DialogBox-Border" then
+                borderName = "Dialog"
+            elseif cfg.borderStyle == "Interface\\BUTTONS\\WHITE8X8" then
+                borderName = "Simple"
+            end
+            UIDropDownMenu_SetText(borderName, this.borderStyleDropdown)
+        end
+        
+        -- Update mode dropdown and status (Tab 10)
+        if this.modeDropdownText and cfg.forceMode then
+            local modeText = "Auto (Detect)"
+            if cfg.forceMode == "vanilla" then
+                modeText = "Vanilla 1.12"
+            elseif cfg.forceMode == "superwow" then
+                modeText = "SuperWoW"
+            end
+            this.modeDropdownText:SetText(modeText)
+        end
+        if this.modeStatus then
+            local activeMode = HAS_SUPERWOW and "|cFF00FF00SuperWoW|r" or "|cFFFFFF00Vanilla|r"
+            local availableText = SUPERWOW_AVAILABLE and "SuperWoW" or "Vanilla"
+            this.modeStatus:SetText("|cFFAAAAAAActive:|r " .. activeMode .. "  |cFFAAAAAAAvailable:|r " .. availableText)
+        end
+
+        -- Tab 11: Proc Frame
+        if this.enableProcCheck then
+            this.enableProcCheck:SetChecked(cfg.procFrameEnabled)
+        end
+        if this.procShowAlwaysCheck then
+            this.procShowAlwaysCheck:SetChecked(cfg.procFrameShowAlways)
+        end
+        if this.lnlCheck then
+            this.lnlCheck:SetChecked(cfg.procFrameLnlEnabled)
+        end
+        if this.ammoCheck then
+            this.ammoCheck:SetChecked(cfg.procFrameAmmoEnabled)
+        end
+        if this.procIconSizeSlider then
+            this.procIconSizeSlider:SetValue(cfg.procFrameIconSize or 40)
+            getglobal(this.procIconSizeSlider:GetName().."Text"):SetText("Icon Size: " .. (cfg.procFrameIconSize or 40))
+        end
+
+        for i, tab in ipairs(tabs) do
+            tab:Show()
+        end
+        
+        -- Update reset blacklist button visibility
+        if tabContents[6] and tabContents[6].resetBlacklistBtn then
+            if UnitExists("pet") then
+                tabContents[6].resetBlacklistBtn:Show()
+            else
+                tabContents[6].resetBlacklistBtn:Hide()
+            end
+        end
+        
+        ShowConfigPreview()
+    end)
+    
+    configFrame:SetScript("OnHide", function()
+        for i, tab in ipairs(tabs) do
+            tab:Hide()
+        end
+        HideConfigPreview()
+        InvalidateConfigCache()  -- Invalidate cache when config UI closes
+        UpdateAurasEventRegistration()  -- Update auras event registration
+    end)
+    
+    return configFrame
+end
+
+local function HideConfigPreview()
+    previewMode = false
+    
+    -- Hide castbar if not currently casting
+    if castFrame then
+        if not isCasting then
+            castFrame:Hide()
+            -- Clear preview text
+            if castBarText and castBarTextTime then
+                castBarText:SetText("")
+                castBarTextTime:SetText("")
+            end
+        end
+    end
+    
+    -- Update buff icons to show only real buffs (not preview buffs)
+    if hasteFrame then
+        UpdateHasteBuffs()
+    end
+    
+    -- Update frame visibility to respect combat settings
+    UpdateFrameVisibility()
+end
+
+local function CreateMinimapButton()
+    minimapButton = CreateFrame("Button", "HamingwaysHunterToolsMinimapButton", Minimap)
+    minimapButton:SetWidth(31)
+    minimapButton:SetHeight(31)
+    minimapButton:SetFrameStrata("MEDIUM")
+    minimapButton:SetFrameLevel(9)
+    minimapButton:SetHighlightTexture("Interface\\Minimap\\UI-Minimap-ZoomButton-Highlight")
+    
+    minimapButton.icon = minimapButton:CreateTexture(nil, "BACKGROUND")
+    minimapButton.icon:SetWidth(20)
+    minimapButton.icon:SetHeight(20)
+    minimapButton.icon:SetTexture("Interface\\Icons\\ability_marksmanship")
+    minimapButton.icon:SetTexCoord(0.05, 0.95, 0.05, 0.95)
+    minimapButton.icon:SetPoint("CENTER", 1, 1)
+    
+    minimapButton.overlay = minimapButton:CreateTexture(nil, "OVERLAY")
+    minimapButton.overlay:SetWidth(53)
+    minimapButton.overlay:SetHeight(53)
+    minimapButton.overlay:SetTexture("Interface\\Minimap\\MiniMap-TrackingBorder")
+    minimapButton.overlay:SetPoint("TOPLEFT", 0, 0)
+    
+    minimapButton:SetScript("OnClick", function()
+        if configFrame:IsShown() then
+            configFrame:Hide()
+        else
+            configFrame:Show()
+        end
+    end)
+    
+    minimapButton:SetScript("OnEnter", function()
+        GameTooltip:SetOwner(this, "ANCHOR_LEFT")
+        GameTooltip:SetText("|cFFABD473Hamingway's |r|cFFFFFF00HunterTools|r")
+        GameTooltip:AddLine("Click to open settings", 0.8, 0.8, 0.8)
+        GameTooltip:Show()
+    end)
+    
+    minimapButton:SetScript("OnLeave", function()
+        GameTooltip:Hide()
+    end)
+    
+    local function UpdateMinimapButton()
+        local cfg = GetConfig()
+        local angle = math.rad(cfg.minimapPos or 225)
+        local x = 80 * math.cos(angle)
+        local y = 80 * math.sin(angle)
+        minimapButton:SetPoint("CENTER", Minimap, "CENTER", x, y)
+    end
+    
+    minimapButton:RegisterForDrag("LeftButton")
+    minimapButton:SetScript("OnDragStart", function()
+        this:LockHighlight()
+        this:SetScript("OnUpdate", function()
+            local mx, my = GetCursorPosition()
+            local px, py = Minimap:GetCenter()
+            local scale = Minimap:GetEffectiveScale()
+            mx, my = mx / scale, my / scale
+            local angle = math.deg(math.atan2(my - py, mx - px))
+            HamingwaysHunterToolsDB.minimapPos = angle
+            UpdateMinimapButton()
+        end)
+    end)
+    
+    minimapButton:SetScript("OnDragStop", function()
+        this:SetScript("OnUpdate", nil)
+        this:UnlockHighlight()
+    end)
+    
+    UpdateMinimapButton()
+    minimapButton:Show()
+end
+
+-- Dynamic OnUpdate management moved to AutoShotTimer module
+
+-- SetupMainFrameUpdate moved to AutoShotTimer module
+
+-- ============ Castbar frame creation moved to HamingwaysHunterTools_Castbar.lua ============
+
+local function CreateHasteFrame(mainFrame)
+    hasteFrame = CreateFrame("Frame", "HamingwaysHunterToolsHasteFrame", UIParent)
+    hasteFrame:SetWidth(240)
+    hasteFrame:SetHeight(28)
+    hasteFrame:SetFrameStrata("MEDIUM")
+    hasteFrame:SetPoint("TOP", mainFrame, "BOTTOM", 0, -2)
+    
+    -- IMPORTANT: Keep frame shown so OnUpdate runs, but make it invisible when no buffs
+    -- OnUpdate only runs on visible frames in WoW 1.12
+    hasteFrame:SetAlpha(0)  -- Start invisible
+    hasteFrame:Show()  -- But keep it shown so OnUpdate runs
+    
+    -- PERFORMANCE: Throttled OnUpdate (0.5s) instead of PLAYER_AURAS_CHANGED event (raid optimized)
+    -- PLAYER_AURAS_CHANGED fires 15-30x/sec (every buff tick) - replaced with 2x/sec polling
+    -- Note: Always runs to detect haste buffs for weapon speed calculation, even if buffbar is hidden
+    hasteFrame:SetScript("OnUpdate", function()
+        if (this.tick or 0) > GetTime() then return else this.tick = GetTime() + 0.5 end
+        
+        UpdateHasteBuffs()
+        UpdateBuffCountdowns()
+    end)
+end
+
+local function CreateMainFrame()
+    frame = CreateFrame("Frame", "HamingwaysHunterToolsFrame", UIParent)
+    frame:SetWidth(240)
+    frame:SetHeight(14)
+    frame:SetFrameStrata("MEDIUM")
+    frame:SetBackdrop({
+        bgFile = "Interface\\BUTTONS\\WHITE8X8",
+        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+        edgeSize = 10,
+        insets = { left = 2, right = 2, top = 2, bottom = 2 }
+    })
+    frame:SetBackdropColor(0, 0, 0, 0.8)
+    frame:SetBackdropBorderColor(1, 1, 1, 0.8)
+    frame:SetPoint("CENTER", UIParent, "CENTER", 0, -200)
+    
+    frame:EnableMouse(true)
+    frame:RegisterForDrag("LeftButton")
+    frame:SetMovable(true)
+    
+    MakeDraggable(frame, "")
+    
+    -- Initialize AutoShot module's frame UI
+    HHT_AutoShot_CreateFrame(frame)
+    
+    return frame
+end
+
+local function CreateUI()
+    print("[HHT] CreateUI START")
+    
+    -- Create main AutoShot timer frame first
+    local mainFrame = CreateMainFrame()
+    
+    print("[HHT] Calling HHT_AutoShot_Initialize...")
+    
+    -- Initialize AutoShot module after frame is created
+    HHT_AutoShot_Initialize()
+    
+    print("[HHT] HHT_AutoShot_Initialize returned")
+    
+    -- Enable OnUpdate if melee timer is active
+    HHT_AutoShot_CheckOnUpdateState()
+    
+    -- Create Minimap Button
+    CreateMinimapButton()
+    
+    -- Create Config Frame
+    CreateConfigFrame()
+    
+    -- Create Castbar
+    local castFrame = CreateFrame("Frame", "HamingwaysHunterToolsCastFrame", UIParent)
+    castFrame:SetWidth(240)
+    castFrame:SetHeight(14)
+    castFrame:SetFrameStrata("MEDIUM")
+    castFrame:SetBackdrop({
+        bgFile = "Interface\\BUTTONS\\WHITE8X8",
+        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+        edgeSize = 10,
+        insets = { left = 2, right = 2, top = 2, bottom = 2 }
+    })
+    castFrame:SetBackdropColor(0, 0, 0, 0.8)
+    castFrame:SetBackdropBorderColor(1, 1, 1, 0.8)
+    castFrame:SetPoint("CENTER", UIParent, "CENTER", 0, -180)
+    castFrame:Hide()
+    
+    castFrame:EnableMouse(true)
+    castFrame:RegisterForDrag("LeftButton")
+    castFrame:SetMovable(true)
+    castFrame:SetScript("OnDragStart", function()
+        if not HamingwaysHunterToolsDB.locked then
+            this:StartMoving()
+        end
+    end)
+    castFrame:SetScript("OnDragStop", function()
+        this:StopMovingOrSizing()
+        castFrame.independentPosition = true
+    end)
+    
+    castFrame:SetScript("OnUpdate", function()
+        if HHT_Core.isCasting and not HHT_Core.previewMode then
+            HHT_Castbar_UpdateCastbar()
+        end
+    end)
+    
+    -- Initialize castbar module
+    HHT_Castbar_CreateFrame(castFrame)
+    
+    -- Create Ammo Frame
+    CreateAmmoFrame()
+    UpdateAmmoDragState()  -- Initialize drag state
+    
+    -- Create Stats Frame
+    CreateStatsFrame()
+    UpdateStatsDragState()  -- Initialize drag state
+    
+    -- Create Pet Feeder Frame
+    HHT_PetFeeder_Initialize(MakeDraggable, CreateBackdrop)
+    
+    -- Create Haste Buff Tracker
+    CreateHasteFrame(mainFrame)
+    
+    return mainFrame
+end
+
+
+-- ============ Shot Detection (delegated to AutoShotTimer module) ============
+
+-- SuperWoW: UNIT_CASTEVENT handler for perfect Auto-Shot detection + dynamic cast times
+-- ============ HandleUnitCastEvent moved to HamingwaysHunterTools_Castbar.lua ============
+
+-- GCD-based instant shot detection (Quiver approach)
+local lastGCDStart = 0
+
+local function GetSpellIndexByName(spellName)
+    local i = 1
+    while true do
+        local name, rank = GetSpellName(i, BOOKTYPE_SPELL)
+        if not name then
+            break
+        end
+        if name == spellName then
+            return i
+        end
+        i = i + 1
+    end
+    return nil
+end
+
+local function CheckNewGCD()
+    -- Use Serpent Sting as GCD indicator (1.5 sec cooldown)
+    local spellIndex = GetSpellIndexByName("Serpent Sting") or GetSpellIndexByName("Schlangenbiss")
+    if spellIndex then
+        local start, duration = GetSpellCooldown(spellIndex, BOOKTYPE_SPELL)
+        -- GCD is ~1.5 seconds, check if new GCD started
+        if duration > 0 and duration < 2 and start ~= lastGCDStart then
+            lastGCDStart = start
+            return true
+        end
+    end
+    return false
+end
+
+local function IsInstantShotSpell(spellName)
+    return spellName and instantShots[spellName]
+end
+
+-- Hook CastSpellByName to detect instant shots via GCD
+local originalCastSpellByName = CastSpellByName
+CastSpellByName = function(spellName, onSelf)
+    originalCastSpellByName(spellName, onSelf)
+    -- Only mark as instant shot if GCD was triggered
+    if IsInstantShotSpell(spellName) and CheckNewGCD() then
+        lastInstantShotTime = GetTime()
+        -- Reset handled by module
+    end
+end
+
+-- Hook UseAction to detect instant shots via GCD
+local originalUseAction = UseAction
+UseAction = function(slot, checkCursor, onSelf)
+    originalUseAction(slot, checkCursor, onSelf)
+    -- GCD check will tell us if an instant shot was actually cast
+    if CheckNewGCD() then
+        lastInstantShotTime = GetTime()
+        -- Reset handled by module
+    end
+end
+
+-- Register only essential events permanently (performance optimized)
+AH:RegisterEvent("START_AUTOREPEAT_SPELL")
+AH:RegisterEvent("STOP_AUTOREPEAT_SPELL")
+AH:RegisterEvent("PLAYER_ENTERING_WORLD")
+AH:RegisterEvent("PLAYER_REGEN_ENABLED")
+AH:RegisterEvent("PLAYER_REGEN_DISABLED")
+AH:RegisterEvent("ADDON_LOADED")
+AH:RegisterEvent("PLAYER_LOGOUT")
+-- Note: UNIT_CASTEVENT registered later in DetectSuperWoW() if available
+-- PLAYER_AURAS_CHANGED: Conditionally registered (only when Pet Feeder or Warnings enabled)
+-- PERFORMANCE: These events registered dynamically only when needed:
+-- ITEM_LOCK_CHANGED, UNIT_INVENTORY_CHANGED: Only during shooting
+-- UI_ERROR_MESSAGE, CHAT_MSG_SPELL_PERIODIC_SELF_BUFFS: Only when buff bar enabled
+-- UNIT_HAPPINESS, UNIT_PET, PET_BAR_UPDATE, PLAYER_TARGET_CHANGED: Only when pet feeder enabled
+-- Melee timer uses combat state polling (no combat log events needed - raid optimized)
+
+-- ============ Event Handler Functions (split to reduce upvalues) ============
+local function HandleAddonLoaded()
+    local _, playerClass = UnitClass("player")
+    if playerClass and playerClass ~= "HUNTER" then
+        isHunter = false
+        return
+    end
+    isHunter = true
+    
+    HamingwaysHunterToolsDB = HamingwaysHunterToolsDB or {}
+    
+    if frame == nil then
+        frame = CreateUI()
+    end
+    local cfg = GetCachedConfig()
+    if cfg.x and cfg.y and cfg.point then
+        frame:ClearAllPoints()
+        frame:SetPoint(cfg.point, UIParent, cfg.point, cfg.x, cfg.y)
+    end
+    if ammoFrame and cfg.ammoX and cfg.ammoY and cfg.ammoPoint then
+        ammoFrame:ClearAllPoints()
+        ammoFrame:SetPoint(cfg.ammoPoint, UIParent, cfg.ammoPoint, cfg.ammoX, cfg.ammoY)
+    end
+    if statsFrame and cfg.statsX and cfg.statsY and cfg.statsPoint then
+        statsFrame:ClearAllPoints()
+        statsFrame:SetPoint(cfg.statsPoint, UIParent, cfg.statsPoint, cfg.statsX, cfg.statsY)
+    end
+    if HHT_PetFeedFrame and HamingwaysHunterToolsDB.petFeedX and HamingwaysHunterToolsDB.petFeedY and HamingwaysHunterToolsDB.petFeedPoint then
+        HHT_PetFeedFrame:ClearAllPoints()
+        HHT_PetFeedFrame:SetPoint(HamingwaysHunterToolsDB.petFeedPoint, UIParent, HamingwaysHunterToolsDB.petFeedPoint, HamingwaysHunterToolsDB.petFeedX, HamingwaysHunterToolsDB.petFeedY)
+    end
+    ApplyFrameSettings()
+    print("HHT: loaded (Quiver-style timer, use /HamingwaysHunterTools test)")
+    frame:Show()
+    UpdateFrameVisibility()
+    UpdateAurasEventRegistration()
+    if statsFrame then UpdateStatsDisplay() end
+    if HHT_PetFeedFrame then HHT_PetFeeder_UpdateDisplay() end
+    
+    -- Initialize NotifyCastAuto API after addon is fully loaded
+    HHT_Castbar_InitNotifyCastAutoAPI()
+end
+
+local function HandlePlayerEnteringWorld()
+    UpdateAmmoDisplay()
+    
+    -- Register feature-specific events based on config (performance optimization)
+    local cfg = GetCachedConfig()
+    if cfg.showBuffBar then
+        AH:RegisterEvent("CHAT_MSG_SPELL_PERIODIC_SELF_BUFFS")
+    end
+    if cfg.showPetFeeder then
+        -- Register UI_ERROR_MESSAGE always when Pet Feeder is enabled (for blacklisting)
+        AH:RegisterEvent("UI_ERROR_MESSAGE")
+        AH:RegisterEvent("UNIT_PET")
+        -- Register pet-specific events if pet is active
+        if UnitExists("pet") then
+            AH:RegisterEvent("UNIT_HAPPINESS")
+            AH:RegisterEvent("PET_BAR_UPDATE")
+            AH:RegisterEvent("PLAYER_TARGET_CHANGED")
+        end
+    end
+    
+    -- Detect SuperWoW right before showing loaded message
+    DetectSuperWoW()
+    
+    if not loadedMessageShown then
+        DEFAULT_CHAT_FRAME:AddMessage("|cFFABD473Hamingway's |r|cFFFFFF00HunterTools |r(" .. VERSION .. ") loaded")
+        loadedMessageShown = true
+    end
+end
+
+local function HandleInventoryChanged()
+    UpdateAmmoDisplay()
+end
+
+local function HandleAurasChanged()
+    
+    -- PERFORMANCE: Haste buff updates moved to hasteFrame OnUpdate (0.5s throttle)
+    -- No longer called from PLAYER_AURAS_CHANGED event (15-30x/sec → 2x/sec)
+    
+    -- PERFORMANCE: Throttle pet feeder and warning updates (0.5s)
+    -- PLAYER_AURAS_CHANGED can fire 100+ times/sec in 40-man raids
+    local now = GetTime()
+    lastAuraUpdateCheck = lastAuraUpdateCheck or 0
+    if now - lastAuraUpdateCheck < 0.5 then return end
+    lastAuraUpdateCheck = now
+    
+    -- Update pet feeder when buffs change (throttled)
+    if HamingwaysHunterToolsDB and HamingwaysHunterToolsDB.showPetFeeder and HHT_PetFeedFrame and UnitExists("pet") then
+        HHT_PetFeeder_UpdateDisplay()
+    end
+    
+    -- Update warnings (throttled)
+    if HHT_UpdateWarningDisplay and HamingwaysHunterToolsDB then
+        if HamingwaysHunterToolsDB.showTrueshotWarning or HamingwaysHunterToolsDB.showAspectWarning then
+            HHT_UpdateWarningDisplay()
+        end
+    end
+end
+
+local function HandleCombatStart()
+    if statsNeedReset then
+        ResetStats()
+        statsNeedReset = false
+    end
+    -- PLAYER_AURAS_CHANGED now registered permanently (for Pet Feeder + Warnings)
+    UpdateFrameVisibility()
+end
+
+local function HandleCombatEnd()
+    -- PERFORMANCE: Direct DB access instead of GetCachedConfig()
+    if HamingwaysHunterToolsDB and HamingwaysHunterToolsDB.autoResetStats and (table.getn(reactionTimes) > 0 or skippedAutoShots > 0 or table.getn(delayedAutoShotTimes) > 0) then
+        statsNeedReset = true
+    end
+    -- PLAYER_AURAS_CHANGED stays registered (permanent for Pet Feeder + Warnings)
+    UpdateFrameVisibility()
+end
+
+local function HandleAutoShotStart()
+    -- Register performance-critical events (only active during shooting)
+    HHT_AutoShot_HandleAutoShotStart()
+    if HAS_SUPERWOW then
+        -- SuperWoW: Register UNIT_CASTEVENT for AutoShot detection
+        if not PLAYER_GUID and UnitExists then
+            local exists, guid = UnitExists("player")  -- SuperWoW returns exists, GUID
+            PLAYER_GUID = guid
+        end
+        if PLAYER_GUID then
+            AH:RegisterEvent("UNIT_CASTEVENT")
+            -- Track registration for coordination with melee timer
+            local state = HHT_AutoShot_GetState()
+            if state then
+                state.registeredEvents = state.registeredEvents or {}
+                state.registeredEvents["UNIT_CASTEVENT"] = true
+            end
+        end
+    else
+        AH:RegisterEvent("ITEM_LOCK_CHANGED")  -- Vanilla: Only ITEM_LOCK_CHANGED
+    end
+    AH:RegisterEvent("UNIT_INVENTORY_CHANGED")
+    UpdateFrameVisibility()
+end
+
+local function HandleAutoShotStop()
+    HHT_AutoShot_HandleAutoShotStop()
+    -- Unregister performance-critical events when not shooting
+    -- But keep UNIT_CASTEVENT if melee timer is active
+    local state = HHT_AutoShot_GetState()
+    if HAS_SUPERWOW then
+        if not (state and state.useMeleeTimer) then
+            AH:UnregisterEvent("UNIT_CASTEVENT")  -- SuperWoW: Unregister if not in melee mode
+            if state then
+                state.registeredEvents = state.registeredEvents or {}
+                state.registeredEvents["UNIT_CASTEVENT"] = nil
+            end
+        end
+    else
+        AH:UnregisterEvent("ITEM_LOCK_CHANGED")  -- Vanilla: Only ITEM_LOCK_CHANGED
+    end
+    AH:UnregisterEvent("UNIT_INVENTORY_CHANGED")
+    UpdateFrameVisibility()
+    -- PERFORMANCE: Check if OnUpdate should be disabled
+    HHT_AutoShot_CheckOnUpdateState()
+end
+
+local function HandleLogout()
+    HamingwaysHunterToolsDB = HamingwaysHunterToolsDB or {}
+    local point, _, _, xOfs, yOfs = frame:GetPoint()
+    HamingwaysHunterToolsDB.point = point
+    HamingwaysHunterToolsDB.x = xOfs
+    HamingwaysHunterToolsDB.y = yOfs
+end
+
+local function HandleUIError(errMsg)
+    -- Forward pet food errors to PetFeeder module
+    HHT_PetFeeder_HandleFoodError(errMsg)
+    
+    if HHT_Core.isCasting then
+        HHT_Core.isCasting = false
+        if castFrame then castFrame:Hide() end
+
+    end
+end
+
+local function HandleBuffGained(message)
+    if message then
+        -- Use hasteBuffNames (reverse lookup) instead of hasteBuffs
+        for buffName, _ in pairs(hasteBuffNames) do
+            if string.find(message, buffName, 1, true) then
+                buffTimestamps[buffName] = GetTime()
+                break
+            end
+        end
+    end
+end
+
+local function HandleItemLockChanged()
+    -- SuperWoW: Skip ITEM_LOCK_CHANGED entirely - we use UNIT_CASTEVENT instead (maximum performance!)
+    if HAS_SUPERWOW and PLAYER_GUID then
+        return  -- Early exit - no processing needed
+    end
+    
+    -- Vanilla: Use ITEM_LOCK_CHANGED with GCD filtering
+    local currentTime = GetTime()
+    if currentTime - lastSpellCastTime < 0.3 then
+        if HHT_DEBUG then
+            DEFAULT_CHAT_FRAME:AddMessage("ITEM_LOCK filtered: recent spell cast", 1, 0.5, 0)
+        end
+        return  -- Don't use ITEM_LOCK for Auto-Shot on SuperWoW
+    end
+    
+    -- Vanilla fallback: Use standard ITEM_LOCK_CHANGED detection
+    local currentTime = GetTime()
+    if currentTime - lastInstantShotTime < 0.5 then
+        -- This ITEM_LOCK_CHANGED is from an instant shot, ignore it
+        return
+    end
+    
+    -- This is a real auto shot - check if we're actually shooting
+    local state = HHT_AutoShot_GetState()
+    if state and state.isShooting then
+        if HHT_DEBUG then
+            DEFAULT_CHAT_FRAME:AddMessage("Auto-Shot detected via ITEM_LOCK_CHANGED (Vanilla)", 0, 1, 0)
+        end
+        HHT_AutoShot_OnShotFired()
+    end
+end
+local function HandlePetEvents()
+    -- PERFORMANCE: Direct DB access, no config table creation
+    if not HamingwaysHunterToolsDB or not HamingwaysHunterToolsDB.showPetFeeder then
+        return
+    end
+    
+    if HHT_PetFeedFrame then
+        if UnitExists("pet") then
+            -- Register pet-specific events when pet becomes active
+            AH:RegisterEvent("UNIT_HAPPINESS")
+            AH:RegisterEvent("PET_BAR_UPDATE")
+            AH:RegisterEvent("PLAYER_TARGET_CHANGED")
+            HHT_PetFeeder_UpdateDisplay(true)  -- Force update when pet state changes
+        else
+            -- Unregister pet-specific events when pet is dismissed
+            AH:UnregisterEvent("UNIT_HAPPINESS")
+            AH:UnregisterEvent("PET_BAR_UPDATE")
+            AH:UnregisterEvent("PLAYER_TARGET_CHANGED")
+            HHT_PetFeeder_UpdateDisplay(true)  -- Force update when pet disappears
+        end
+    end
+end
+
+local function HandlePlayerTargetChanged()
+    if not HHT_PetFeedFrame then return end
+    
+    -- PERFORMANCE: Direct DB access instead of GetCachedConfig()
+    if not HamingwaysHunterToolsDB or not HamingwaysHunterToolsDB.autoFeedPet then
+        return
+    end
+    
+    -- WORKAROUND: WoW 1.10+ requires DropItemOnUnit() to be called from a player-initiated event
+    -- This is the same approach used by PetFeeder addon (see PetFeederFrame.lua line 629)
+    -- Block auto-feed when player is mounted (Turtle WoW)
+    if UnitExists("pet") and not IsPlayerMounted() then
+        local happiness = GetPetHappiness()
+        local hasFeedEffect = HHT_PetFeeder_HasFeedEffect()
+        -- Only attempt feed if pet needs it and we haven't tried recently (prevent spam)
+        local currentTime = GetTime()
+        if (happiness == 1 or happiness == 2) and not hasFeedEffect then
+            if currentTime - HHT_PetFeedFrame.lastAutoFeedAttempt >= 2 then  -- 2 second cooldown
+                HHT_PetFeedFrame.lastAutoFeedAttempt = currentTime
+                HHT_PetFeeder_FeedPet(true)  -- silent mode (no error messages)
+            end
+        end
+    end
+end
+
+local function HandleCombatLog(message)
+    -- PERFORMANCE: Direct DB access instead of GetCachedConfig()
+    if not useMeleeTimer then
+        return  -- Early exit if melee timer disabled
+    end
+    
+    -- AttackBar logic: Use string.find (Lua 5.0 compatible)
+    -- Check if it's a spell first: "Your <spell> hits/crits/misses"
+    local a, b, spell = string.find(message, "Your (.+) hits")
+    if not spell then a, b, spell = string.find(message, "Your (.+) crits") end
+    if not spell then a, b, spell = string.find(message, "Your (.+) is") end
+    if not spell then a, b, spell = string.find(message, "Your (.+) misses") end
+    
+    -- If it's a spell, it's not a melee auto-attack
+    if spell then
+        return
+    end
+    
+    -- It's a melee auto-attack (no spell name found)
+    -- Like AttackBar: distinguish mainhand from offhand
+    local mainSpeed, offSpeed = UnitAttackSpeed("player")
+    
+    if not offSpeed then
+        -- No offhand = all hits are mainhand
+        lastMeleeSwingTime = GetTime()
+        isMeleeSwinging = true
+        UpdateMeleeSpeed()
+    else
+        -- Has offhand: use timing comparison (AttackBar method)
+        local currentTime = GetTime()
+        local timeSinceLastSwing = currentTime - lastMeleeSwingTime
+        
+        -- Mainhand if: first swing OR time matches mainhand speed better than 50%
+        if timeSinceLastSwing == 0 or timeSinceLastSwing > (mainSpeed * 0.5) then
+            lastMeleeSwingTime = currentTime
+            isMeleeSwinging = true
+            UpdateMeleeSpeed()
+        end
+        -- else: ignore offhand swing
+    end
+end
+
+AH:SetScript("OnEvent", function()
+    if event == "ADDON_LOADED" and arg1 == "HamingwaysHunterTools" then
+        HandleAddonLoaded()
+        return
+    end
+    
+    if event == "PLAYER_ENTERING_WORLD" then
+        if isHunter == false then
+            DEFAULT_CHAT_FRAME:AddMessage("Hamingway whispers: Aye, I've seen proper hunters, and ye, friend... ye ain't one o' 'em.", 1.0, 0.5, 1.0)
+            AH:UnregisterAllEvents()
+            return
+        end
+        ScanMountSpells()
+    end
+    
+    if isHunter == false then
+        return
+    end
+    
+    if frame == nil then
+        frame = CreateUI()
+    end
+    
+    if event == "PLAYER_ENTERING_WORLD" then
+        HandlePlayerEnteringWorld()
+    elseif event == "START_AUTOREPEAT_SPELL" then
+        HandleAutoShotStart()
+    elseif event == "STOP_AUTOREPEAT_SPELL" then
+        HandleAutoShotStop()
+    elseif event == "PLAYER_LOGOUT" then
+        HandleLogout()
+    elseif event == "PLAYER_AURAS_CHANGED" then
+        HandleAurasChanged()
+    elseif event == "UNIT_INVENTORY_CHANGED" and arg1 == "player" then
+        HandleInventoryChanged()
+    elseif event == "ITEM_LOCK_CHANGED" then
+        HandleItemLockChanged()
+    elseif event == "UNIT_CASTEVENT" then
+        HHT_Castbar_HandleUnitCastEvent()
+    elseif event == "PLAYER_REGEN_DISABLED" then
+        HandleCombatStart()
+    elseif event == "PLAYER_REGEN_ENABLED" then
+        HandleCombatEnd()
+    elseif event == "UI_ERROR_MESSAGE" then
+        HandleUIError(arg1)
+    elseif event == "PLAYER_TARGET_CHANGED" then
+        HandlePlayerTargetChanged()
+    elseif event == "UNIT_PET" and arg1 == "player" then
+        HandlePetEvents()
+    elseif event == "UNIT_HAPPINESS" and arg1 == "pet" then
+        HandlePetEvents()
+    elseif event == "CHAT_MSG_COMBAT_SELF_HITS" or event == "CHAT_MSG_COMBAT_SELF_MISSES" then
+        HandleCombatLog(arg1)
+    end
+end)
+
+
+-- ============ Slash Commands ============
+SLASH_HamingwaysHunterTools1 = "/HamingwaysHunterTools"
+SLASH_HamingwaysHunterTools2 = "/hamingway"
+SLASH_HamingwaysHunterTools3 = "/hht"
+SlashCmdList["HamingwaysHunterTools"] = function(msgArg)
+    local msgLower = string.lower(msgArg or "")
+    if msgLower == "reset" then
+        HHT_AutoShot_Reset()
+        print("HHT: timer reset")
+    elseif msgLower == "lock" then
+        HamingwaysHunterToolsDB.locked = true
+        if frame then frame:EnableMouse(false) end
+        print("HHT: locked")
+    elseif msgLower == "unlock" then
+        HamingwaysHunterToolsDB.locked = false
+        if frame then frame:EnableMouse(true) end
+        print("HHT: unlocked (drag to move)")
+    elseif msgLower == "config" then
+        if configFrame then
+            if configFrame:IsShown() then
+                configFrame:Hide()
+            else
+                configFrame:Show()
+            end
+        end
+    elseif msgLower == "test" then
+        print("HHT: test shot")
+        HHT_AutoShot_OnShotFired()
+    elseif msgLower == "debug" then
+        HHT_DEBUG = not HHT_DEBUG
+        print("HamingwaysHunterTools Debug: " .. (HHT_DEBUG and "ENABLED" or "DISABLED"))
+        if HHT_DEBUG then
+            print("Debug info: shooting=" .. tostring(isShooting) .. " reload=" .. tostring(isReloading) .. " speed=" .. tostring(weaponSpeed))
+            local currentMode = HamingwaysHunterToolsDB.forceMode or "auto"
+            print("Mode: " .. currentMode .. " | Active: " .. (HAS_SUPERWOW and "SuperWoW" or "Vanilla") .. " | Available: " .. tostring(SUPERWOW_AVAILABLE))
+            print("SuperWoW API: " .. tostring(SUPERWOW_AutoShotAPI or "none"))
+        end
+    elseif string.find(msgLower, "^mode") then
+        local args = {}
+        for word in string.gmatch(msgArg, "%S+") do
+            table.insert(args, string.lower(word))
+        end
+        
+        if table.getn(args) == 1 then
+            -- Show current mode
+            local currentMode = HamingwaysHunterToolsDB.forceMode or "auto"
+            local activeMode = HAS_SUPERWOW and "SuperWoW" or "Vanilla"
+            local availableMode = SUPERWOW_AVAILABLE and "SuperWoW" or "Vanilla"
+            print("|cFFABD473=== HHT Mode Status ===")
+            print("|cFFFFFFFFConfig Mode:|r " .. currentMode)
+            print("|cFFFFFFFFActive Mode:|r " .. activeMode)
+            print("|cFFFFFFFFAvailable:|r " .. availableMode .. " (hardware detection)")
+            print("|cFFFFFF00Usage:|r /hht mode <auto|vanilla|superwow>")
+        else
+            local newMode = args[2]
+            local success, msg = SetMode(newMode)
+            if success then
+                print("|cFF00FF00" .. msg)
+                print("|cFFFFFF00Reload UI (/reload) for full effect|r")
+            else
+                print("|cFFFF6666Error: " .. msg .. "|r")
+            end
+        end
+    elseif msgLower == "superwow" then
+        print("=== SuperWoW API Check ===")
+        print("SUPERWOW_VERSION: " .. tostring(SUPERWOW_VERSION))
+        print("SUPERWOW_STRING: " .. tostring(SUPERWOW_STRING))
+        print("GetPlayerBuffID: " .. tostring(GetPlayerBuffID ~= nil))
+        print("GetPlayerBuffTimeLeft: " .. tostring(GetPlayerBuffTimeLeft ~= nil))
+        print("SpellInfo: " .. tostring(SpellInfo ~= nil))
+        print("UNIT_CASTEVENT: registered")
+        local version = GetBuildInfo and GetBuildInfo()
+        print("Build Info: " .. tostring(version or "unknown"))
+        print("")
+        print("Detected Features:")
+        print("  SUPERWOW_AVAILABLE: " .. tostring(SUPERWOW_AVAILABLE))
+        print("  HAS_SUPERWOW (active): " .. tostring(HAS_SUPERWOW))
+        print("  Auto-Shot API: " .. tostring(SUPERWOW_AutoShotAPI or "none"))
+        print("  Buff API: " .. tostring(SUPERWOW_BuffAPI or "none"))
+        print("")
+        print("Mode: " .. (HamingwaysHunterToolsDB.forceMode or "auto"))
+    elseif msgLower == "stats" or msgLower == "resetstats" then
+        ResetStats()
+    elseif msgLower == "resetwarnings" then
+        if HHT_ResetWarningPosition then
+            HHT_ResetWarningPosition()
+        else
+            print("HHT: Warning frame not initialized yet")
+        end
+    elseif msgLower == "proc scan" or msgLower == "proc" then
+        if HHT_ProcFrame_Scan then
+            HHT_ProcFrame_Scan()
+        else
+            print("HHT: Proc Frame not initialized (SuperWoW required)")
+        end
+    else
+        print("HHT Commands:")
+        print("  /hht mode [auto|vanilla|superwow] - Switch between modes")
+        print("  /hht config - Toggle config window")
+        print("  /hht lock/unlock - Lock/unlock frame")
+        print("  /hht reset - Reset timer")
+        print("  /hht test - Test shot")
+        print("  /hht debug - Toggle debug mode")
+        print("  /hht superwow - Show SuperWoW API info")
+        print("  /hht stats - Reset statistics")
+        print("  /hht resetwarnings - Reset warning position")
+        print("  /hht proc scan - Scan active buffs (for proc frame setup)")
+        print("")
+        local currentMode = HamingwaysHunterToolsDB.forceMode or "auto"
+        local activeMode = HAS_SUPERWOW and "SuperWoW" or "Vanilla"
+        print("|cFFABD473Current Mode:|r " .. currentMode .. " (Active: " .. activeMode .. ")")
+    end
+end
+
+
+
