@@ -1,0 +1,15 @@
+# Backup files
+git/
+*.backup_*
+*.lua.backup_*
+
+# Python / kernhunde-planner (separate project)
+kernhunde-planner/
+
+# Other unrelated addons
+RollFor/
+AddOns/KH_TotemTracker/
+
+# Python cache
+__pycache__/
+*.pyc
