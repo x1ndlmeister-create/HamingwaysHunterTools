@@ -53,7 +53,7 @@ local ProcState = {
 -- ============ Buff Detection Constants ============
 -- Spell IDs (primary detection via GetPlayerBuffID - fastest and most reliable)
 -- Verified in-game via /hht proc scan:
-local LNL_SPELL_ID          = 58111  -- Lock and Load (verified 2026-03-20)
+local LNL_SPELL_ID          = 52921  -- Lock and Load (verified 2026-03-20 via /hht proc scan: B6 ID:52921)
 local AMMO_ID_EXPLOSIVE     = nil    -- TODO: scan in-game with Explosive Ammo active
 local AMMO_ID_POISONOUS     = nil    -- TODO: scan in-game with Poisonous Ammo active
 local AMMO_ID_ENCHANTED     = nil    -- TODO: scan in-game with Enchanted Ammo active
@@ -149,7 +149,7 @@ local function ScanProcs(force)
             if texture then
                 local spellID = GetPlayerBuffID and GetPlayerBuffID(i) or nil
                 local hit = false
-                if spellID and spellID == LNL_SPELL_ID then
+                if spellID and spellID == LNL_SPELL_ID and MatchTexture(texture, LNL_TEXTURE_PATTERN) then
                     hit = true
                 elseif MatchTexture(texture, LNL_TEXTURE_PATTERN) then
                     hit = true
