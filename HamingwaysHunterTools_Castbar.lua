@@ -381,16 +381,9 @@ function HHT_Castbar_HandleUnitCastEvent()
     
     -- SuperWoW: Track cast spells dynamically (Aimed Shot, Multi-Shot, Steady Shot, etc.)
     if eventType == "START" and castDurationMS and castDurationMS > 0 then
-        -- Cast started.
-        -- castDurationMS is the BASE duration from the server (WITHOUT haste).
-        -- Apply hasteMultiplier so the bar matches the actual (hasted) cast duration.
-        local hasteMultiplier = 1.0
-        if HHT_AutoShot_GetState then
-            local s = HHT_AutoShot_GetState()
-            if s then hasteMultiplier = s.hasteMultiplier or 1.0 end
-        end
+        -- castDurationMS is already the hasted duration from the server, use it directly.
         local spellNameForCast = KNOWN_SPELL_NAMES[spellID] or ("Spell " .. spellID)
-        local duration = (castDurationMS / 1000) * hasteMultiplier
+        local duration = castDurationMS / 1000
         HHT_Core.isCasting = true
         CastbarState.castSpellID = spellID
         CastbarState.castStartTime = GetTime()

@@ -3,7 +3,7 @@
 -- Autoshot timer matching Quiver's design: red reload, yellow windup
 
 -- Version: x.y.z (x=release 0-9, y=feature 0-999, z=build 0-9999)
-local VERSION = "1.1.2"  -- Feature: Proc Frame (Lock and Load, Experimental Ammunition)
+local VERSION = "1.1.3"  -- Fix: Castbar duration, haste buff timer, repo structure
 
 local AH = CreateFrame("Frame", "HamingwaysHunterToolsCore")
 
@@ -1056,7 +1056,8 @@ local function UpdateHasteBuffs()
                     local buff = activeBuffs[activeBuffCount]
                     buff.name = buffName
                     buff.texture = buffTexture
-                    buff.buffIndex = buffIndex  -- Store INDEX for GetPlayerBuffTimeLeft
+                    buff.buffIndex = buffIndex
+                    buff.expireTime = currentTime + actualRemaining  -- Use expiry time, not repeated GetPlayerBuffTimeLeft
                     buff.count = buffCount or 0
                 end
             end
@@ -1100,13 +1101,11 @@ local function UpdateHasteBuffs()
             hasteIcons[i]:SetHeight(iconSize)
         end
         
-        if activeBuffs[i] and activeBuffs[i].buffIndex then
-            -- Query API once and cache the value
-            local remaining = GetPlayerBuffTimeLeft(activeBuffs[i].buffIndex)
-            activeBuffs[i].cachedRemaining = remaining  -- Cache for UpdateBuffCountdowns
+        if activeBuffs[i] and activeBuffs[i].expireTime then
+            local remaining = activeBuffs[i].expireTime - GetTime()
             
             -- Only show icon if buff still has time remaining
-            if remaining and remaining > 0 then
+            if remaining > 0 then
                 hasteIcons[i].icon:SetTexture(activeBuffs[i].texture)
                 local seconds = math.floor(remaining)
                 hasteIcons[i].cooldown:SetText(tostring(seconds))
