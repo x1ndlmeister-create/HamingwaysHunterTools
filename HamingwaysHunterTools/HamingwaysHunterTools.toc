@@ -1,8 +1,8 @@
 ## Interface: 11200
 ## Title: |cffABD473Hamingway's|r HunterTools
-## Notes: Complete hunter toolkit with auto shot timer, reaction stats, ammo tracking and pet feeder (Vanilla 1.12)
+## Notes: Complete hunter toolkit with auto shot timer, reaction stats, ammo tracking and pet feeder (SuperWoW required)
 ## Author: Hamingway
-## Version: 1.1.0
+## Version: 1.1.2
 
 ## SavedVariablesPerCharacter: HamingwaysHunterToolsDB
 

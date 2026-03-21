@@ -2,11 +2,26 @@
 
 A comprehensive, feature-rich Hunter addon for World of Warcraft Classic (1.12) that provides everything you need for optimal Hunter gameplay.
 
-![Version](https://img.shields.io/badge/version-1.0.1-blue.svg)
+![Version](https://img.shields.io/badge/version-1.1.2-blue.svg)
 ![WoW](https://img.shields.io/badge/WoW-1.12%20Vanilla-orange.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 
+> ⚠️ **Requires [SuperWoW](https://github.com/balakethelock/SuperWoW)**
+> This addon requires SuperWoW by Balake. Install SuperWoW before using HamingwaysHunterTools.
+
 ## 🎯 Features
+
+### Proc Frame *(requires SuperWoW)*
+
+![Proc Frame](images/procframe.png)
+
+- **Lock and Load** — tracks remaining duration, triggers LazyHunt Aimed Shot replacement
+- **Experimental Ammunition** — detects all three variants and shows which spell to cast:
+  - 🔥 Explosive → Multi-Shot
+  - 🟢 Poisonous → Serpent Sting
+  - 🟣 Enchanted → Arcane Shot
+- Moveable icons with timers, adjustable size, Show Always mode
+- **All-in-One macro:** `/script HHT_API.SmartAmmoAction()`
 
 ### AutoShot Timer
 

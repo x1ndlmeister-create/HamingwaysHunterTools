@@ -29,8 +29,9 @@ local ProcState = {
 
     -- Lock and Load detection state
     lnlActive    = false,
-    lnlSlot      = 0,    -- buff slot index for live texture re-lookup
-    lnlExpireTime = 0,   -- GetTime() value when LnL expires (set at detection)
+    lnlSlot      = 0,    -- 0-based GetPlayerBuff index (same index for GetPlayerBuffTimeLeft)
+    lnlBuffId    = 0,    -- buffId from GetPlayerBuff (for GetPlayerBuffTexture)
+    lnlExpireTime = 0,   -- GetTime() value when LnL expires (refreshed every scan to handle slot-drift)
 
     -- Experimental Ammo detection state
     ammoActive    = false,
@@ -138,30 +139,35 @@ local function ScanProcs(force)
     -- Reset before scan
     ProcState.lnlActive  = false
     ProcState.lnlSlot    = 0
+    ProcState.lnlBuffId  = 0
     ProcState.ammoActive = false
     ProcState.ammoSlot   = 0
     ProcState.ammoType   = nil
 
     -- ---- Scan BUFFS: Lock and Load ----
+    -- Use GetPlayerBuff/GetPlayerBuffTexture (0-based) so GetPlayerBuffTimeLeft(i) uses
+    -- the exact same index - consistent with how the haste bar works.
     if lnlEnabled then
-        for i = 1, MAX_BUFF_SLOTS do
-            local texture = UnitBuff("player", i)
-            if texture then
+        for i = 0, MAX_BUFF_SLOTS do
+            local buffId = GetPlayerBuff(i, "HELPFUL")
+            if buffId >= 0 then
+                local texture = GetPlayerBuffTexture(buffId)
                 local spellID = GetPlayerBuffID and GetPlayerBuffID(i) or nil
                 local hit = false
-                if spellID and spellID == LNL_SPELL_ID and MatchTexture(texture, LNL_TEXTURE_PATTERN) then
+                if spellID and spellID == LNL_SPELL_ID then
                     hit = true
-                elseif MatchTexture(texture, LNL_TEXTURE_PATTERN) then
+                elseif texture and MatchTexture(texture, LNL_TEXTURE_PATTERN) then
                     hit = true
                 else
-                    local name = ReadBuffNameFromTooltip("player", i)
+                    local name = ReadBuffNameFromTooltip("player", i + 1)  -- tooltip uses 1-based
                     if name and string.find(name, LNL_BUFF_NAME, 1, true) then
                         hit = true
                     end
                 end
                 if hit then
                     ProcState.lnlActive = true
-                    ProcState.lnlSlot   = i
+                    ProcState.lnlSlot   = i       -- 0-based, for GetPlayerBuffTimeLeft(i)
+                    ProcState.lnlBuffId = buffId  -- for GetPlayerBuffTexture(buffId)
                     break
                 end
             end
@@ -170,11 +176,12 @@ local function ScanProcs(force)
 
     -- ---- Scan DEBUFFS: Experimental Ammo ----
     -- These appear as player debuffs (self-applied procs), not buffs
+    -- NOTE: same 1-based/0-based split as buffs: UnitDebuff is 1-based, GetPlayerDebuffID is 0-based.
     if ammoEnabled then
         for i = 1, MAX_BUFF_SLOTS do
             local texture = UnitDebuff("player", i)
             if texture then
-                local spellID = GetPlayerDebuffID and GetPlayerDebuffID(i) or nil
+                local spellID = GetPlayerDebuffID and GetPlayerDebuffID(i - 1) or nil
                 local amType = nil
                 -- Primary: spell ID
                 if spellID then
@@ -220,17 +227,12 @@ local function ScanProcs(force)
         end
     end
 
-    -- ---- Set expire times on activation transitions ----
-    -- LnL: capture GetPlayerBuffTimeLeft at the MOMENT of detection (most reliable reading)
-    if ProcState.lnlActive and not prevLnlActive then
-        local captured = GetPlayerBuffTimeLeft and GetPlayerBuffTimeLeft(ProcState.lnlSlot) or 0
-        if captured > 0 and captured < 300 then
-            ProcState.lnlExpireTime = GetTime() + captured
-        else
-            ProcState.lnlExpireTime = 0  -- unknown duration, will show "!"
-        end
-    elseif not ProcState.lnlActive then
-        ProcState.lnlExpireTime = 0
+    -- ---- Set expire times ----
+    -- LnL: timer is read FRESH every display tick in HHT_UpdateProcDisplay (not cached here).
+    -- Caching caused a 1-in-10 wrong-value bug: when LnL and Ammo proc together, GetPlayerBuffTimeLeft
+    -- could return the previous buff's stale time (~60s) on the first scan and lock it in.
+    if not ProcState.lnlActive then
+        ProcState.lnlExpireTime = 0  -- reset on deactivation
     end
 
     -- Ammo: use fixed known duration (GetPlayerDebuffTimeLeft unavailable)
@@ -340,13 +342,21 @@ function HHT_UpdateProcDisplay()
     -- Lock and Load slot
     if lnlEnabled then
         local liveTex = nil
-        if ProcState.lnlActive and ProcState.lnlSlot > 0 then
-            liveTex = UnitBuff("player", ProcState.lnlSlot)
-            -- UNIT_BUFF fires before the buff list updates in 1.12, so the cached
-            -- slot may now hold a different buff. Validate it still matches LnL.
-            if not liveTex or not MatchTexture(liveTex, LNL_TEXTURE_PATTERN) then
-                ProcState.lnlActive    = false
-                ProcState.lnlSlot      = 0
+        if ProcState.lnlActive and ProcState.lnlBuffId > 0 then
+            liveTex = GetPlayerBuffTexture(ProcState.lnlBuffId)
+            if liveTex and MatchTexture(liveTex, LNL_TEXTURE_PATTERN) then
+                -- Read timer FRESH every display tick (0.05s) - never use a cached value.
+                -- If one read is stale (e.g. returns prev buff's time), the next frame corrects it.
+                local tl = GetPlayerBuffTimeLeft and GetPlayerBuffTimeLeft(ProcState.lnlSlot) or 0
+                if tl > 0 then
+                    ProcState.lnlExpireTime = GetTime() + tl
+                end
+                -- tl == 0: no timer data or permanent buff - keep previous expireTime as-is
+            else
+                -- Slot no longer holds LnL (expired between scans)
+                ProcState.lnlActive     = false
+                ProcState.lnlSlot       = 0
+                ProcState.lnlBuffId     = 0
                 ProcState.lnlExpireTime = 0
                 liveTex = nil
             end

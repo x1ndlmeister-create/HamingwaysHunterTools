@@ -1,4 +1,4 @@
--- HamingwaysHunterTools_Castbar.lua
+﻿-- HamingwaysHunterTools_Castbar.lua
 -- Castbar Module
 -- Handles cast detection, bar display, and statistics tracking
 
@@ -12,13 +12,24 @@ local CastbarState = {
     castBarFrame = nil,
     castBarText = nil,
     castBarTextTime = nil,
-    
+    castBarShine = nil,
+    castBarSpark = nil,
+    castBarFlash = nil,
+
     -- Cast state
     castStartTime = 0,
     castEndTime = 0,
     castDuration = 0,
     castSpellName = "",
     castSpellID = 0,
+
+    -- Flash/FadeOut state (DragonflightUI-style cast-complete effect)
+    flashActive = false,
+    flashAlpha = 0,
+    fadeOutActive = false,
+    flashLastTime = 0,   -- GetTime() at last flash/fadeout tick
+    FLASH_SPEED = 5.0,   -- alpha units per second for flash-in
+    FADEOUT_SPEED = 2.5, -- alpha units per second for frame fadeout
 }
 
 -- Constants
@@ -51,6 +62,12 @@ local HandleCastAttempt
 -- ============ Cast Time Calculation ============
 local function CalcCastTime(spellName)
     local meta = HHT_castSpells[spellName]
+    if not meta then
+        -- Strip rank suffix so "Aimed Shot (Rank 9)" matches ["Aimed Shot"]
+        -- Also handles German "Rang" via the generic " %(" strip
+        local baseName = string.match(spellName, "^(.+) %(") or ""
+        meta = HHT_castSpells[baseName]
+    end
     if not meta then return nil end
     
     if meta.Haste == "range" then
@@ -65,34 +82,107 @@ local function CalcCastTime(spellName)
     end
 end
 
+-- Hide spark and shine (shared cleanup helper)
+local function HideCastbarEffects()
+    if CastbarState.castBarSpark then CastbarState.castBarSpark:Hide() end
+    if CastbarState.castBarShine then CastbarState.castBarShine:Hide() end
+end
+
+-- Trigger the DragonflightUI-style flash+fadeout effect
+-- r,g,b: color of the flash (green = success, red = fail)
+local function TriggerCastFlash(r, g, b)
+    if not CastbarState.castBarFrame or not CastbarState.castFrame then return end
+    local maxWidth = CastbarState.castFrame:GetWidth() - 4
+    -- Bar jumps to 100%, colored
+    CastbarState.castBarFrame:SetWidth(maxWidth)
+    CastbarState.castBarFrame:SetTexCoord(0, 1, 0, 1)
+    CastbarState.castBarFrame:SetGradientAlpha(
+        "VERTICAL",
+        r, g, b, BAR_ALPHA,
+        r * 0.55, g * 0.55, b * 0.55, BAR_ALPHA
+    )
+    HideCastbarEffects()
+    -- Flash overlay
+    if CastbarState.castBarFlash then
+        CastbarState.castBarFlash:SetTexture(r, g, b, 0)
+        CastbarState.castBarFlash:SetAlpha(0)
+        CastbarState.castBarFlash:Show()
+    end
+    CastbarState.flashActive = true
+    CastbarState.flashAlpha = 0
+    CastbarState.fadeOutActive = false
+    CastbarState.flashLastTime = GetTime()
+    CastbarState.castFrame:SetAlpha(1)
+end
+
 -- ============ Castbar Update ============
 UpdateCastbar = function()
     -- PERFORMANCE: Early exit if castbar is disabled
     if not HamingwaysHunterToolsDB or not HamingwaysHunterToolsDB.showCastbar then return end
-    if not HHT_Core.isCasting then return end
     if not CastbarState.castFrame or not CastbarState.castBarFrame or not CastbarState.castBarText or not CastbarState.castBarTextTime then
         return
     end
-    
+
+    -- ---- Flash phase: flash overlay fading in ----
+    if CastbarState.flashActive then
+        local now = GetTime()
+        local dt = now - CastbarState.flashLastTime
+        CastbarState.flashLastTime = now
+        CastbarState.flashAlpha = CastbarState.flashAlpha + CastbarState.FLASH_SPEED * dt
+        if CastbarState.flashAlpha >= 1 then
+            CastbarState.flashAlpha = 1
+            CastbarState.flashActive = false
+            CastbarState.fadeOutActive = true
+            CastbarState.flashLastTime = now
+        end
+        if CastbarState.castBarFlash then
+            CastbarState.castBarFlash:SetAlpha(CastbarState.flashAlpha)
+        end
+        return
+    end
+
+    -- ---- FadeOut phase: entire castframe fading out ----
+    if CastbarState.fadeOutActive then
+        local now = GetTime()
+        local dt = now - CastbarState.flashLastTime
+        CastbarState.flashLastTime = now
+        local alpha = CastbarState.castFrame:GetAlpha() - CastbarState.FADEOUT_SPEED * dt
+        if alpha <= 0 then
+            CastbarState.fadeOutActive = false
+            CastbarState.castFrame:SetAlpha(1)
+            CastbarState.castFrame:Hide()
+            if CastbarState.castBarFlash then
+                CastbarState.castBarFlash:Hide()
+            end
+            -- Check if main AutoShot frame should hide too
+            local frame = HHT_AutoShot_GetFrame()
+            if frame then
+                local showOnlyInCombat = HamingwaysHunterToolsDB and HamingwaysHunterToolsDB.showOnlyInCombat
+                local inCombat = UnitAffectingCombat("player")
+                local state = HHT_AutoShot_GetState()
+                if showOnlyInCombat and not inCombat and not (state and state.isShooting) and not HHT_Core.previewMode then
+                    frame:Hide()
+                end
+            end
+            HHT_AutoShot_CheckOnUpdateState()
+        else
+            CastbarState.castFrame:SetAlpha(alpha)
+        end
+        return
+    end
+
+    -- ---- Normal cast: only run while isCasting ----
+    if not HHT_Core.isCasting then return end
+
     local now = GetTime()
     local elapsed = now - CastbarState.castStartTime
     local duration = CastbarState.castEndTime - CastbarState.castStartTime
-    
+
     if elapsed >= duration then
+        -- Timer ran out without a CAST event (fallback): treat as success
         HHT_Core.isCasting = false
-        HHT_Core.lastCastEndTime = GetTime()  -- Mark when cast ended
-        CastbarState.castFrame:Hide()
-        -- Hide main frame if needed when casting ends
-        local frame = HHT_AutoShot_GetFrame()
-        if frame then
-            local showOnlyInCombat = HamingwaysHunterToolsDB and HamingwaysHunterToolsDB.showOnlyInCombat
-            local inCombat = UnitAffectingCombat("player")
-            local state = HHT_AutoShot_GetState()
-            if showOnlyInCombat and not inCombat and not (state and state.isShooting) and not HHT_Core.previewMode then
-                frame:Hide()
-            end
-        end
-        -- PERFORMANCE: Check if OnUpdate should be disabled
+        HHT_Core.lastCastEndTime = GetTime()
+        TriggerCastFlash(0, 1, 0)  -- green
         HHT_AutoShot_CheckOnUpdateState()
         return
     end
@@ -100,8 +190,24 @@ UpdateCastbar = function()
     local percent = elapsed / duration
     local maxWidth = CastbarState.castFrame:GetWidth() - 4
     local width = math.max(1, maxWidth * percent)
-    
+
     CastbarState.castBarFrame:SetWidth(width)
+    -- SetTexCoord: crop texture to current width instead of stretching it
+    CastbarState.castBarFrame:SetTexCoord(0, percent, 0, 1)
+
+    -- Shine strip follows bar width
+    if CastbarState.castBarShine then
+        CastbarState.castBarShine:SetWidth(width)
+        CastbarState.castBarShine:Show()
+    end
+
+    -- Spark moves to leading edge of bar
+    if CastbarState.castBarSpark then
+        CastbarState.castBarSpark:ClearAllPoints()
+        CastbarState.castBarSpark:SetPoint("CENTER", CastbarState.castFrame, "LEFT", 2 + width, 0)
+        CastbarState.castBarSpark:Show()
+    end
+
     CastbarState.castBarText:SetText(CastbarState.castSpellName)
     if HamingwaysHunterToolsDB and HamingwaysHunterToolsDB.showTimerText then
         CastbarState.castBarTextTime:SetText(string.format("%.2fs/%.2fs", elapsed, duration))
@@ -112,102 +218,8 @@ end
 
 -- ============ Start Cast ============
 StartCast = function(spellName, castTime)
-    -- SuperWoW: Skip old cast detection - we use UNIT_CASTEVENT instead
-    if HAS_SUPERWOW and PLAYER_GUID then
-        return
-    end
-    
-    if not HHT_Core.isCasting then
-        HHT_Core.isCasting = true
-        CastbarState.castSpellName = spellName
-        CastbarState.castStartTime = GetTime()
-        CastbarState.castEndTime = CastbarState.castStartTime + castTime
-        
-        -- Only track statistics if stats frame is enabled
-        local trackStats = HamingwaysHunterToolsDB and HamingwaysHunterToolsDB.showStats
-        
-        -- Get AutoShot state for stats tracking
-        local asState = HHT_AutoShot_GetState()
-        
-        -- Track reaction time if auto-shot was fired recently
-        if trackStats and asState and asState.lastAutoShotTime and asState.lastAutoShotTime > 0 then
-            local reactionTime = CastbarState.castStartTime - asState.lastAutoShotTime
-            -- Only track if cast started within 3 seconds of auto-shot
-            if reactionTime > 0 and reactionTime < 3.0 then
-                table.insert(reactionTimes, reactionTime)
-                -- Keep only last MAX_REACTION_SAMPLES
-                if table.getn(reactionTimes) > MAX_REACTION_SAMPLES then
-                    table.remove(reactionTimes, 1)
-                end
-                -- Reset to prevent counting multiple casts after one auto-shot
-                HHT_AutoShot_ResetReactionTracking()
-            end
-        end
-        
-        -- Track skipped auto-shots (only between Steady Shots)
-        local isSteadyShot = spellName and (string.find(spellName, "Steady Shot") or string.find(spellName, "Stetiger Schuss"))
-        if trackStats and isSteadyShot then
-            if lastCastTime > 0 and (CastbarState.castStartTime - lastCastTime) < 10 then
-                totalCastSequences = totalCastSequences + 1
-                if asState and not asState.autoShotBetweenCasts then
-                    skippedAutoShots = skippedAutoShots + 1
-                end
-            end
-            lastCastTime = CastbarState.castStartTime
-            -- Reset for next sequence
-            HHT_AutoShot_ResetAutoShotBetweenCasts()
-        end
-        
-        -- Track delayed auto-shots (yellow bar reset by cast, not movement)
-        local state = HHT_AutoShot_GetState()
-        if trackStats and state and state.timeReloadStart and state.timeReloadStart > 0 then
-            local reloadDuration = state.weaponSpeed - AIMING_TIME
-            local castEndTime = CastbarState.castStartTime + castTime
-            local elapsed = GetTime() - state.timeReloadStart
-            
-            -- Yellow phase: from reload complete to shoot complete
-            local yellowPhaseStart = reloadDuration
-            local yellowPhaseEnd = state.weaponSpeed
-            
-            -- Check if cast overlaps with yellow phase
-            -- Cast overlaps if: cast starts before yellow ends AND cast ends after yellow starts
-            local castStartsAt = elapsed
-            local castEndsAt = elapsed + castTime
-            local castOverlapsYellow = (castStartsAt < yellowPhaseEnd) and (castEndsAt >= yellowPhaseStart)
-            
-            if castOverlapsYellow then
-                -- Calculate the delay: how much longer until next auto-shot compared to normal
-                -- Normal: yellow phase would end at weaponSpeed elapsed time
-                -- With cast: yellow phase ends at (castEndTime + AIMING_TIME)
-                local normalYellowEnd = yellowPhaseEnd
-                local actualYellowEnd = castEndsAt + AIMING_TIME
-                local delayTime = actualYellowEnd - normalYellowEnd
-                
-                if delayTime > 0 then
-                    table.insert(delayedAutoShotTimes, delayTime)
-                    if table.getn(delayedAutoShotTimes) > MAX_DELAYED_SAMPLES then
-                        table.remove(delayedAutoShotTimes, 1)
-                    end
-                end
-            end
-        end
-        
-        if CastbarState.castFrame and HamingwaysHunterToolsDB.showCastbar then
-            CastbarState.castFrame:Show()
-        end
-        -- PERFORMANCE: Enable main OnUpdate for frame visibility updates during cast
-        HHT_AutoShot_EnableOnUpdate()
-        -- Also show main frame when casting starts
-        local frame = HHT_AutoShot_GetFrame()
-        if frame and HamingwaysHunterToolsDB.showAutoShotTimer then
-            local showOnlyInCombat = HamingwaysHunterToolsDB and HamingwaysHunterToolsDB.showOnlyInCombat
-            local inCombat = UnitAffectingCombat("player")
-            local state = HHT_AutoShot_GetState()
-            if not showOnlyInCombat or inCombat or HHT_Core.previewMode or (state and state.isShooting) or HHT_Core.isCasting then
-                frame:Show()
-            end
-        end
-    end
+    -- SuperWoW: UNIT_CASTEVENT handles cast detection; this function is a no-op.
+    return
 end
 
 -- ============ Spell Finding Functions ============
@@ -316,15 +328,48 @@ function HHT_Castbar_CreateFrame(castFrame)
     CastbarState.castFrame = castFrame
     
     local cfg = GetDB()
+    local barH = castFrame:GetHeight() - 4
+    local castColor = cfg.castColor or {r=0.5, g=0.5, b=1}
+
+    -- Main bar
     CastbarState.castBarFrame = castFrame:CreateTexture(nil, "BORDER")
     CastbarState.castBarFrame:SetPoint("TOPLEFT", castFrame, "TOPLEFT", 2, -2)
-    CastbarState.castBarFrame:SetHeight(castFrame:GetHeight() -4)
+    CastbarState.castBarFrame:SetHeight(barH)
     CastbarState.castBarFrame:SetWidth(1)
     CastbarState.castBarFrame:SetTexture(cfg.barStyle or "Interface\\TargetingFrame\\UI-StatusBar")
-    -- Use castColor from settings (or fallback to blue)
-    local castColor = cfg.castColor or {r=0.5, g=0.5, b=1}
-    CastbarState.castBarFrame:SetVertexColor(castColor.r, castColor.g, castColor.b, BAR_ALPHA)
-    
+    -- Vertical gradient: bright on top, darker on bottom for depth
+    CastbarState.castBarFrame:SetGradientAlpha(
+        "VERTICAL",
+        castColor.r,        castColor.g,        castColor.b,        BAR_ALPHA,
+        castColor.r * 0.55, castColor.g * 0.55, castColor.b * 0.55, BAR_ALPHA
+    )
+
+    -- Shine strip: top ~35% of bar, white semi-transparent highlight
+    local shineH = math.max(2, math.floor(barH * 0.35))
+    CastbarState.castBarShine = castFrame:CreateTexture(nil, "ARTWORK")
+    CastbarState.castBarShine:SetPoint("TOPLEFT", castFrame, "TOPLEFT", 2, -2)
+    CastbarState.castBarShine:SetHeight(shineH)
+    CastbarState.castBarShine:SetWidth(1)
+    CastbarState.castBarShine:SetTexture(1, 1, 1, 0.18)
+    CastbarState.castBarShine:Hide()
+
+    -- Spark at leading edge (moves with the bar)
+    CastbarState.castBarSpark = castFrame:CreateTexture(nil, "OVERLAY")
+    CastbarState.castBarSpark:SetTexture("Interface\\CastingBar\\UI-CastingBar-Spark")
+    CastbarState.castBarSpark:SetWidth(22)
+    CastbarState.castBarSpark:SetHeight(barH + 8)
+    CastbarState.castBarSpark:SetBlendMode("ADD")
+    CastbarState.castBarSpark:SetAlpha(0.9)
+    CastbarState.castBarSpark:Hide()
+
+    -- Flash overlay: covers the entire bar, fades in on cast complete, then frame fades out
+    CastbarState.castBarFlash = castFrame:CreateTexture(nil, "OVERLAY")
+    CastbarState.castBarFlash:SetPoint("TOPLEFT",     castFrame, "TOPLEFT",     2, -2)
+    CastbarState.castBarFlash:SetPoint("BOTTOMRIGHT", castFrame, "BOTTOMRIGHT", -2, 2)
+    CastbarState.castBarFlash:SetTexture(1, 1, 1, 0)  -- will be colored green/red at runtime
+    CastbarState.castBarFlash:SetBlendMode("ADD")
+    CastbarState.castBarFlash:Hide()
+
     CastbarState.castBarText = castFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     CastbarState.castBarText:SetPoint("CENTER", castFrame, "CENTER", 0, 0)
     CastbarState.castBarText:SetTextColor(1, 1, 1, 1)
@@ -387,15 +432,38 @@ function HHT_Castbar_HandleUnitCastEvent()
     
     -- SuperWoW: Track cast spells dynamically (Aimed Shot, Multi-Shot, Steady Shot, etc.)
     if eventType == "START" and castDurationMS and castDurationMS > 0 then
-        -- Cast started - NOTE: castDurationMS is BASE duration WITHOUT haste!
-        -- The actual cast will finish earlier with haste buffs
+        -- Cast started.
+        -- castDurationMS is the BASE duration from the server (WITHOUT haste).
+        -- We use CalcCastTime() instead, which applies the current ranged haste multiplier,
+        -- so the bar matches the actual (hasted) cast duration.
+        -- Fallback to castDurationMS if spell is not in our database.
+        local spellNameForCast = KNOWN_SPELL_NAMES[spellID] or ("Spell " .. spellID)
+        local calculatedTime = CalcCastTime(spellNameForCast)
+        local duration = calculatedTime or (castDurationMS / 1000)
         HHT_Core.isCasting = true
-        CastbarState.castSpellID = spellID  -- Track which spell we're casting
+        CastbarState.castSpellID = spellID
         CastbarState.castStartTime = GetTime()
-        CastbarState.castDuration = castDurationMS / 1000  -- Convert ms to seconds (base duration)
-        CastbarState.castEndTime = CastbarState.castStartTime + CastbarState.castDuration
-        local spellName = KNOWN_SPELL_NAMES[spellID] or ("Spell " .. spellID)
+        CastbarState.castDuration = duration
+        CastbarState.castEndTime = CastbarState.castStartTime + duration
+        local spellName = spellNameForCast
         CastbarState.castSpellName = spellName
+        -- Reset flash/fadeout state and restore bar to cast color
+        CastbarState.flashActive   = false
+        CastbarState.fadeOutActive = false
+        CastbarState.flashAlpha    = 0
+        CastbarState.castFrame:SetAlpha(1)
+        if CastbarState.castBarFlash then CastbarState.castBarFlash:Hide() end
+        HideCastbarEffects()
+        -- Restore bar gradient to configured cast color
+        local castColor = (HamingwaysHunterToolsDB and HamingwaysHunterToolsDB.castColor) or {r=0.5, g=0.5, b=1}
+        local r, g, b = castColor.r, castColor.g, castColor.b
+        CastbarState.castBarFrame:SetGradientAlpha(
+            "VERTICAL",
+            r,        g,        b,        BAR_ALPHA,
+            r * 0.55, g * 0.55, b * 0.55, BAR_ALPHA
+        )
+        CastbarState.castBarFrame:SetWidth(1)
+        CastbarState.castBarFrame:SetTexCoord(0, 0, 0, 1)
         
         -- Only track statistics if stats frame is enabled
         local trackStats = HamingwaysHunterToolsDB and HamingwaysHunterToolsDB.showStats
@@ -489,36 +557,32 @@ function HHT_Castbar_HandleUnitCastEvent()
             HHT_Core.isCasting = false
             CastbarState.castSpellID = 0
             HHT_Core.lastCastEndTime = GetTime()
-            if CastbarState.castFrame then
-                CastbarState.castFrame:Hide()
+            -- Green flash + fadeout (DragonflightUI-style)
+            if HamingwaysHunterToolsDB and HamingwaysHunterToolsDB.showCastbar then
+                TriggerCastFlash(0, 1, 0)
+            else
+                if CastbarState.castFrame then CastbarState.castFrame:Hide() end
             end
-            if CastbarState.castBarFrame then
-                CastbarState.castBarFrame:Hide()
-            end
-            -- PERFORMANCE: Check if OnUpdate should be disabled
             HHT_AutoShot_CheckOnUpdateState()
             if HHT_DEBUG then
                 DEFAULT_CHAT_FRAME:AddMessage("  -> Cast finished: " .. CastbarState.castSpellName .. " (ID " .. spellID .. ", actual: " .. string.format("%.3f", actualDuration) .. "s)", 0, 1, 0.5)
             end
         elseif HHT_DEBUG and not BUFF_PROC_SPELLS[spellID] then
-            -- Ignore buff procs, but show other mismatches
             DEFAULT_CHAT_FRAME:AddMessage("  -> Ignoring CAST event for ID " .. spellID .. " (currently casting: " .. (CastbarState.castSpellID or "none") .. ")", 0.7, 0.7, 0.7)
         end
     elseif eventType == "FAIL" then
-        -- Cast interrupted - abort ANY active cast (movement/damage may send different spellID)
+        -- Cast interrupted - red flash + fadeout
         if HHT_Core.isCasting then
             local interruptedAt = GetTime() - CastbarState.castStartTime
             local interruptedSpellName = CastbarState.castSpellName
             HHT_Core.isCasting = false
             CastbarState.castSpellID = 0
             HHT_Core.lastCastEndTime = GetTime()
-            if CastbarState.castFrame then
-                CastbarState.castFrame:Hide()
+            if HamingwaysHunterToolsDB and HamingwaysHunterToolsDB.showCastbar then
+                TriggerCastFlash(1, 0, 0)  -- red = interrupted
+            else
+                if CastbarState.castFrame then CastbarState.castFrame:Hide() end
             end
-            if CastbarState.castBarFrame then
-                CastbarState.castBarFrame:Hide()
-            end
-            -- PERFORMANCE: Check if OnUpdate should be disabled
             HHT_AutoShot_CheckOnUpdateState()
             if HHT_DEBUG then
                 DEFAULT_CHAT_FRAME:AddMessage("  -> Cast FAILED: " .. interruptedSpellName .. " (FAIL ID " .. spellID .. ", interrupted at " .. string.format("%.3f", interruptedAt) .. "s)", 1, 0, 0)
@@ -528,6 +592,10 @@ function HHT_Castbar_HandleUnitCastEvent()
 end
 
 -- ============ Public API Functions ============
+function HHT_Castbar_IsFlashing()
+    return CastbarState.flashActive or CastbarState.fadeOutActive
+end
+
 function HHT_Castbar_UpdateCastbar()
     UpdateCastbar()
 end
@@ -553,7 +621,7 @@ function HHT_Castbar_AbortCast()
 end
 
 function HHT_Castbar_InitNotifyCastAutoAPI()
-    HamingwaysHunterTools_API.NotifyCastAuto = function(spellName)
+    HHT_API.NotifyCastAuto = function(spellName)
         if not spellName or not HHT_castSpells[spellName] then 
             return false 
         end

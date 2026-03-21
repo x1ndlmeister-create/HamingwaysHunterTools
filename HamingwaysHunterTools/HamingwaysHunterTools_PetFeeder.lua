@@ -52,6 +52,11 @@ local cachedHasFeedEffect = false
 local lastFeedEffectCheck = 0
 local FEED_EFFECT_CACHE_DURATION = 1  -- seconds
 
+-- Short cooldown after feeding to bridge the gap until the buff appears on the pet
+-- (the Feed Pet Effect doesn't show instantly, so we block re-feeding for a few seconds)
+local lastFeedTime = 0
+local FEED_REBLOCK_SECONDS = 1  -- brief buffer until the buff appears on the pet
+
 -- Cache for UpdateDisplay to throttle UI updates and prevent string allocations
 local lastDisplayUpdate = 0
 local DISPLAY_UPDATE_THROTTLE = 0.2  -- seconds (5 FPS update rate)
@@ -89,32 +94,26 @@ local function HasPet()
     return true
 end
 
--- Global function to check if pet has feed buff (with caching to prevent excessive tooltip scans)
+-- Feed Pet Effect buff texture (same icon as the Feed Pet spell itself)
+local FEED_PET_EFFECT_TEXTURE = "ability_hunter_beasttraining"
+
+-- Global function to check if pet has feed buff.
+-- Matches by texture pattern, same approach as ProcFrame uses for LnL ("lockandload").
 function HHT_PetFeeder_HasFeedEffect()
     local currentTime = GetTime()
     if currentTime - lastFeedEffectCheck < FEED_EFFECT_CACHE_DURATION then
         return cachedHasFeedEffect
     end
-    
     lastFeedEffectCheck = currentTime
-    local i = 1
-    while UnitBuff("pet", i) do
-        if HamingwaysHunterToolsTooltip then
-            HamingwaysHunterToolsTooltip:SetOwner(UIParent, "ANCHOR_NONE")
-            HamingwaysHunterToolsTooltip:SetUnitBuff("pet", i)
-            local buffName = HamingwaysHunterToolsTooltipTextLeft1:GetText()
-            HamingwaysHunterToolsTooltip:Hide()
-            
-            if buffName and (
-               string.find(buffName, "Feed Pet Effect") or
-               string.find(buffName, "Haustier.*Effect") or
-               string.find(buffName, "Effet.*familier")
-            ) then
-                cachedHasFeedEffect = true
-                return true
-            end
+
+    -- Fixed-range loop (not while) — UnitBuff can return nil mid-list in 1.12
+    for i = 1, 32 do
+        local buffTex = UnitBuff("pet", i)
+        if not buffTex then break end
+        if string.find(string.lower(buffTex), FEED_PET_EFFECT_TEXTURE, 1, true) then
+            cachedHasFeedEffect = true
+            return true
         end
-        i = i + 1
     end
     cachedHasFeedEffect = false
     return false
@@ -252,6 +251,12 @@ end
 
 -- Global function for feeding pet (called from main addon)
 function HHT_PetFeeder_FeedPet(silent)
+    -- Never feed in combat: Feed Pet fails silently but PickupContainerItem still
+    -- picks up the food, leaving it stuck on the cursor.
+    if UnitAffectingCombat("player") then
+        return false
+    end
+
     if not HasPet() then
         if not silent then
             DEFAULT_CHAT_FRAME:AddMessage("|cFFABD473Hamingway's HunterTools:|r No pet active", WARNING_COLOR.r, WARNING_COLOR.g, WARNING_COLOR.b)
@@ -265,16 +270,15 @@ function HHT_PetFeeder_FeedPet(silent)
         end
         return false
     end
-    
-    if HasFeedEffect() then
+
+    -- Block for 1s after feeding (brief gap until the buff appears on the pet),
+    -- then use real buff detection via texture-matching.
+    if GetTime() - lastFeedTime < FEED_REBLOCK_SECONDS then
         return false
     end
-    
-    if HHT_PetFeedFrame and HHT_PetFeedFrame.lastSuccessfulFeed then
-        local timeSinceLastFeed = GetTime() - HHT_PetFeedFrame.lastSuccessfulFeed
-        if timeSinceLastFeed < 15 then
-            return false
-        end
+
+    if HasFeedEffect() then
+        return false
     end
     
     local foodToFeed = nil
@@ -334,9 +338,7 @@ function HHT_PetFeeder_FeedPet(silent)
     
     if CursorHasItem() then
         DropItemOnUnit("pet")
-        if HHT_PetFeedFrame then
-            HHT_PetFeedFrame.lastSuccessfulFeed = GetTime()
-        end
+        lastFeedTime = GetTime()
         -- Invalidate caches so count/effect updates immediately
         cachedFoodList = nil
         cachedSelectedFoodItemID = nil

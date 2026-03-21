@@ -209,58 +209,20 @@ local function UpdateCombatEventRegistration()
     local db = GetDB()
     if not db then return end
     
-    -- Combat events needed for melee timer (Vanilla mode only)
-    -- SuperWoW uses MAINHAND events instead (more accurate)
-    local shouldRegister = (db.showMeleeTimer or db.autoSwitchMeleeRanged) and AutoShotState.useMeleeTimer and not HAS_SUPERWOW
-    
-    if shouldRegister then
-        -- Register combat log events (Vanilla only)
-        if not AutoShotState.registeredEvents["CHAT_MSG_COMBAT_SELF_HITS"] then
-            AutoShotModule:RegisterEvent("CHAT_MSG_COMBAT_SELF_HITS")
-            AutoShotModule:RegisterEvent("CHAT_MSG_COMBAT_SELF_MISSES")
-            AutoShotState.registeredEvents["CHAT_MSG_COMBAT_SELF_HITS"] = true
-            AutoShotState.registeredEvents["CHAT_MSG_COMBAT_SELF_MISSES"] = true
-            if HHT_DEBUG then
-                print("[MeleeTimer] Combat events registered (Vanilla)")
+    -- SuperWoW: Always use UNIT_CASTEVENT for melee (MAINHAND events)
+    local needUnitCastEvent = (db.showMeleeTimer or db.autoSwitchMeleeRanged) and AutoShotState.useMeleeTimer
+    if needUnitCastEvent then
+        if PLAYER_GUID and not AutoShotState.registeredEvents["UNIT_CASTEVENT"] then
+            if AH then
+                AH:RegisterEvent("UNIT_CASTEVENT")
+                AutoShotState.registeredEvents["UNIT_CASTEVENT"] = true
             end
         end
     else
-        -- Unregister combat log events
-        if AutoShotState.registeredEvents["CHAT_MSG_COMBAT_SELF_HITS"] then
-            AutoShotModule:UnregisterEvent("CHAT_MSG_COMBAT_SELF_HITS")
-            AutoShotModule:UnregisterEvent("CHAT_MSG_COMBAT_SELF_MISSES")
-            AutoShotState.registeredEvents["CHAT_MSG_COMBAT_SELF_HITS"] = nil
-            AutoShotState.registeredEvents["CHAT_MSG_COMBAT_SELF_MISSES"] = nil
-            AutoShotState.isMeleeSwinging = false
-            if HHT_DEBUG then
-                print("[MeleeTimer] Combat events unregistered")
-            end
-        end
-    end
-    
-    -- SuperWoW: Register UNIT_CASTEVENT separately for MAINHAND events
-    if HAS_SUPERWOW then
-        local needUnitCastEvent = (db.showMeleeTimer or db.autoSwitchMeleeRanged) and AutoShotState.useMeleeTimer
-        if needUnitCastEvent then
-            if PLAYER_GUID and not AutoShotState.registeredEvents["UNIT_CASTEVENT"] then
-                if AH then
-                    AH:RegisterEvent("UNIT_CASTEVENT")
-                    AutoShotState.registeredEvents["UNIT_CASTEVENT"] = true
-                    if HHT_DEBUG then
-                        print("[MeleeTimer] UNIT_CASTEVENT registered for MAINHAND (SuperWoW)")
-                    end
-                end
-            end
-        else
-            -- Unregister UNIT_CASTEVENT if not needed and not shooting
-            if AutoShotState.registeredEvents["UNIT_CASTEVENT"] and not AutoShotState.isShooting then
-                if AH then
-                    AH:UnregisterEvent("UNIT_CASTEVENT")
-                    AutoShotState.registeredEvents["UNIT_CASTEVENT"] = nil
-                    if HHT_DEBUG then
-                        print("[MeleeTimer] UNIT_CASTEVENT unregistered (SuperWoW)")
-                    end
-                end
+        if AutoShotState.registeredEvents["UNIT_CASTEVENT"] and not AutoShotState.isShooting then
+            if AH then
+                AH:UnregisterEvent("UNIT_CASTEVENT")
+                AutoShotState.registeredEvents["UNIT_CASTEVENT"] = nil
             end
         end
     end
@@ -811,11 +773,8 @@ function HHT_AutoShot_Initialize()
     
     print("[HHT] AutoShot_Initialize: Weapon speeds updated")
     
-    -- Setup event handler
+    -- Setup event handler (nil - AutoShotModule events are handled by UNIT_CASTEVENT in main module)
     AutoShotModule:SetScript("OnEvent", function()
-        if event == "CHAT_MSG_COMBAT_SELF_HITS" or event == "CHAT_MSG_COMBAT_SELF_MISSES" then
-            HandleCombatLog(arg1)
-        end
     end)
     
     print("[HHT] AutoShot_Initialize: Event handler set")
@@ -825,7 +784,7 @@ function HHT_AutoShot_Initialize()
     print("[HHT] AutoShot_Initialize: Timer mode updated, useMeleeTimer=" .. tostring(AutoShotState.useMeleeTimer))
     
     UpdateCombatEventRegistration()
-    print("[HHT] AutoShot_Initialize: Combat events registered=" .. tostring(AutoShotState.registeredEvents["CHAT_MSG_COMBAT_SELF_HITS"] ~= nil))
+    print("[HHT] AutoShot_Initialize: Combat events registered, UNIT_CASTEVENT=" .. tostring(AutoShotState.registeredEvents["UNIT_CASTEVENT"] ~= nil))
     
     -- Always output status
     local db = GetDB()

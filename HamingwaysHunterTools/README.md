@@ -2,10 +2,9 @@
 
 ## Version 1.1.0
 
-> ⚠️ **SuperWoW Notice**
-> New features introduced in v1.1.0 (Proc Frame, accurate buff timers) require [SuperWoW](https://github.com/balakethelock/SuperWoW) by Balake.
-> The addon will continue to work without SuperWoW, but new features will be unavailable.
-> **Future versions will require SuperWoW as a hard dependency.**
+> ⚠️ **Requires [SuperWoW](https://github.com/balakethelock/SuperWoW)**
+> This addon requires SuperWoW by Balake for full functionality (Proc Frame, accurate buff timers).
+> Install SuperWoW before using HamingwaysHunterTools.
 
 ---
 
@@ -70,10 +69,10 @@ Copy the `HamingwaysHunterTools` folder into your `Interface/AddOns` directory.
 ---
 
 ## Features
+- **Proc Frame**: Lock and Load + Experimental Ammunition tracking *(requires SuperWoW)*
 - **Auto Shot Timer**: Visual bar showing ranged weapon cooldown with precise timing
 - **Melee Swing Timer**: Shows melee attack cooldown (hits, crits, misses, parries, dodges, blocks)
 - **Range Detection**: Target distance category with Dead Zone blink warning
-- **Proc Frame**: Lock and Load + Experimental Ammunition tracking *(SuperWoW)*
 - **Castbar**: Visual cast progress for Steady Shot, Multi-Shot, etc.
 - **Ammo Tracking**: Monitor ammunition count
 - **Pet Feeder**: Automatic pet feeding system

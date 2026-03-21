@@ -1,9 +1,9 @@
-
+﻿
 -- HamingwaysHunterTools - Vanilla 1.12
 -- Autoshot timer matching Quiver's design: red reload, yellow windup
 
 -- Version: x.y.z (x=release 0-9, y=feature 0-999, z=build 0-9999)
-local VERSION = "1.1.0"  -- Feature: Proc Frame (Lock and Load, Experimental Ammunition)
+local VERSION = "1.1.2"  -- Feature: Proc Frame (Lock and Load, Experimental Ammunition)
 
 local AH = CreateFrame("Frame", "HamingwaysHunterToolsCore")
 
@@ -87,206 +87,85 @@ KNOWN_SPELL_NAMES = {
     -- SuperWoW will auto-detect and cache all other spells (Steady Shot, Multi-Shot ranks, Aimed Shot ranks, Arcane Shot ranks, etc.)
 }
 
--- ============ SuperWoW Detection (One-time check at load) ============
-HAS_SUPERWOW = false
-local SUPERWOW_AutoShotAPI = nil
-local SUPERWOW_BuffAPI = nil
-local SUPERWOW_AVAILABLE = false  -- Hardware detection (actual APIs present)
-
-local function DetectSuperWoW()
-    -- Check for SuperWoW specific APIs (Balake's version)
-    
-    -- Priority 1: Check for GetPlayerBuffID (most reliable)
-    if GetPlayerBuffID then
-        SUPERWOW_AVAILABLE = true
-        SUPERWOW_BuffAPI = "GetPlayerBuffID"
-    end
-    
-    -- Priority 2: Check for GetPlayerBuffTimeLeft (fallback)
-    if GetPlayerBuffTimeLeft then
-        SUPERWOW_AVAILABLE = true
-        if not SUPERWOW_BuffAPI then
-            SUPERWOW_BuffAPI = "GetPlayerBuffTimeLeft"
-        end
-    end
-    
-    -- Priority 3: Check for SUPERWOW_VERSION or SUPERWOW_STRING
-    if SUPERWOW_VERSION or SUPERWOW_STRING then
-        SUPERWOW_AVAILABLE = true
-    end
-    
-    -- NOTE: UNIT_CASTEVENT does NOT support Auto-Shot detection
-    -- Per SuperWoW API: event types are "START", "CAST", "FAIL", "CHANNEL", "MAINHAND", "OFFHAND"
-    -- No "RANGED" type exists - Auto-Shot is not tracked by this event
-    -- We use Vanilla ITEM_LOCK_CHANGED for reliable Auto-Shot detection on all clients
-    
-    -- Apply mode override from config
-    local forceMode = HamingwaysHunterToolsDB and HamingwaysHunterToolsDB.forceMode or "auto"
-    if forceMode == "superwow" then
-        HAS_SUPERWOW = SUPERWOW_AVAILABLE  -- Can only force SuperWoW if APIs exist
-    elseif forceMode == "vanilla" then
-        HAS_SUPERWOW = false  -- Force Vanilla mode even if SuperWoW present
-    else  -- "auto"
-        HAS_SUPERWOW = SUPERWOW_AVAILABLE
-    end
-    
-    if HAS_SUPERWOW then
-        local features = {}
-        if SUPERWOW_BuffAPI then
-            table.insert(features, "Buffs: " .. SUPERWOW_BuffAPI)
-        end
-        
-        local modeText = forceMode == "superwow" and " (Forced)" or ""
-        if table.getn(features) > 0 then
-            DEFAULT_CHAT_FRAME:AddMessage("|cFFABD473Hamingway's HunterTools:|r SuperWoW mode enabled" .. modeText, 0.67, 0.83, 0.45)
-            for i = 1, table.getn(features) do
-                DEFAULT_CHAT_FRAME:AddMessage("  |cFFFFFFFF" .. features[i] .. "|r", 0.8, 0.8, 0.8)
-            end
-            DEFAULT_CHAT_FRAME:AddMessage("  |cFFFFFFFFAuto-Shot: UNIT_CASTEVENT filtering (improved accuracy)|r", 0.8, 0.8, 0.8)
-        else
-            DEFAULT_CHAT_FRAME:AddMessage("|cFFABD473Hamingway's HunterTools:|r SuperWoW mode enabled (limited features)" .. modeText, 0.8, 0.8, 0.8)
-        end
-        
-        -- Note: UNIT_CASTEVENT registered dynamically during shooting for performance
-    else
-        local modeText = forceMode == "vanilla" and " (Forced)" or ""
-        DEFAULT_CHAT_FRAME:AddMessage("|cFFABD473Hamingway's HunterTools:|r Vanilla 1.12 mode" .. modeText, 0.8, 0.8, 0.8)
-    end
-end
-
--- Set mode at runtime (for testing)
-local function SetMode(mode)
-    if not mode or (mode ~= "auto" and mode ~= "vanilla" and mode ~= "superwow") then
-        return false, "Invalid mode. Use: auto, vanilla, or superwow"
-    end
-    
-    HamingwaysHunterToolsDB.forceMode = mode
-    
-    -- Store old mode for event re-registration
-    local oldMode = HAS_SUPERWOW
-    
-    -- Apply new mode
-    if mode == "superwow" then
-        if not SUPERWOW_AVAILABLE then
-            return false, "SuperWoW APIs not available on this client"
-        end
-        HAS_SUPERWOW = true
-    elseif mode == "vanilla" then
-        HAS_SUPERWOW = false
-    else  -- "auto"
-        HAS_SUPERWOW = SUPERWOW_AVAILABLE
-    end
-    
-    -- Re-register events if mode changed and currently shooting
-    if oldMode ~= HAS_SUPERWOW then
-        local state = HHT_AutoShot_GetState()
-        if state and state.isShooting then
-            -- Unregister old mode events
-            if oldMode then
-                -- Was SuperWoW, switching to Vanilla
-                if PLAYER_GUID then
-                    AH:UnregisterEvent("UNIT_CASTEVENT")
-                end
-            else
-                -- Was Vanilla, switching to SuperWoW
-                AH:UnregisterEvent("ITEM_LOCK_CHANGED")
-            end
-            
-            -- Register new mode events
-            if HAS_SUPERWOW then
-                -- Switching to SuperWoW
-                if PLAYER_GUID then
-                    AH:RegisterEvent("UNIT_CASTEVENT")
-                end
-            else
-                -- Switching to Vanilla
-                AH:RegisterEvent("ITEM_LOCK_CHANGED")
-            end
-        end
-    end
-    
-    -- Show mode change message
-    local modeColor = HAS_SUPERWOW and "|cFF00FF00" or "|cFFFFFF00"
-    local modeName = HAS_SUPERWOW and "SuperWoW" or "Vanilla"
-    DEFAULT_CHAT_FRAME:AddMessage("|cFFABD473Hamingway's HunterTools:|r Mode changed to " .. modeColor .. modeName .. "|r (" .. mode .. ")", 0.67, 0.83, 0.45)
-    
-    if not SUPERWOW_AVAILABLE and mode == "superwow" then
-        DEFAULT_CHAT_FRAME:AddMessage("  |cFFFF6666Warning: SuperWoW APIs not detected, staying in Vanilla mode|r", 1, 0.4, 0.4)
-    end
-    
-    return true, "Mode set to: " .. mode
-end
+-- ============ SuperWoW Required ============
+-- Detection happens in HandleAddonLoaded via GetPlayerBuffID check.
+-- UNIT_CASTEVENT for cast + melee detection; GetPlayerBuffID for buffs.
+HAS_SUPERWOW = true  -- Always true: addon aborts at load if SuperWoW not present
 
 -- ============ Timer State (now in AutoShotTimer module) ============
 -- AutoShot state is accessed via HHT_AutoShot_State global
 local AIMING_TIME = 0.5  -- 0.5s like Quiver (not 0.65)
 
 -- Global API for other addons (like LazyHunt) to access timer state
-HamingwaysHunterTools_API = {}
+HHT_API = {}
 
 -- Initialize API functions (needs to be after local variables are defined)
 local function InitAPI()
-    HamingwaysHunterTools_API.IsReloading = function()
+    HHT_API.IsReloading = function()
         local state = HHT_AutoShot_GetState()
         return state and state.isReloading or false
     end
-    HamingwaysHunterTools_API.IsShooting = function()
+    HHT_API.IsShooting = function()
         local state = HHT_AutoShot_GetState()
         return state and state.isShooting or false
     end
-    HamingwaysHunterTools_API.IsCasting = function() return HHT_Core.isCasting end
-    HamingwaysHunterTools_API.GetLastShotTime = function()
+    HHT_API.IsCasting = function() return HHT_Core.isCasting end
+    HHT_API.GetLastShotTime = function()
         local state = HHT_AutoShot_GetState()
         return state and state.lastAutoFired or 0
     end
-    HamingwaysHunterTools_API.GetWeaponSpeed = function()
+    HHT_API.GetWeaponSpeed = function()
         local state = HHT_AutoShot_GetState()
         return state and state.weaponSpeed or 2.0
     end
-    HamingwaysHunterTools_API.GetBaseWeaponSpeed = function()
+    HHT_API.GetBaseWeaponSpeed = function()
         local state = HHT_AutoShot_GetState()
         return state and state.baseWeaponSpeed or 2.0
     end
-    HamingwaysHunterTools_API.GetHasteMultiplier = function()
+    HHT_API.GetHasteMultiplier = function()
         local state = HHT_AutoShot_GetState()
         return state and state.hasteMultiplier or 1.0
     end
-    HamingwaysHunterTools_API.GetAimingTime = function() return AIMING_TIME end
-    HamingwaysHunterTools_API.IsInRedPhase = function()
+    HHT_API.GetAimingTime = function() return AIMING_TIME end
+    HHT_API.IsInRedPhase = function()
         -- Red phase = Same logic as red bar display
         local state = HHT_AutoShot_GetState()
         return state and state.isShooting and state.isReloading
     end
-    HamingwaysHunterTools_API.IsInYellowPhase = function()
+    HHT_API.IsInYellowPhase = function()
         -- Yellow phase = Same logic as yellow bar display
         local state = HHT_AutoShot_GetState()
         return state and state.isShooting and not state.isReloading
     end
-    -- Notify about external casts (from LazyHunt) - used for instant casts like Multi-Shot
-    HamingwaysHunterTools_API.NotifyCast = function(spellName, castTime)
-        -- SuperWoW: Skip NotifyCast - we use UNIT_CASTEVENT instead (more accurate)
-        if HAS_SUPERWOW and PLAYER_GUID then
-            return
-        end
-        
-        -- Vanilla: Use castbar module
-        HHT_Castbar_StartCast(spellName, castTime)
+    -- Notify about external casts (from LazyHunt) - SuperWoW: no-op, UNIT_CASTEVENT handles detection
+    HHT_API.NotifyCast = function(spellName, castTime)
+        return
     end
     
     -- Simplified API: Auto-calculate cast time from spell database (for user macros)
     -- NOTE: This function will be properly initialized after addon loads (see HandleAddonLoaded)
-    HamingwaysHunterTools_API.NotifyCastAuto = function(spellName)
+    HHT_API.NotifyCastAuto = function(spellName)
         DEFAULT_CHAT_FRAME:AddMessage("|cFFABD473Hamingway's HunterTools:|r NotifyCastAuto not yet initialized", 1, 0, 0)
         return false
     end
     
+    -- Smart Ammo Action: fires the correct spell based on active Experimental Ammo proc
+    -- Explosive   → Multi-Shot
+    -- Poisonous   → Serpent Sting
+    -- Enchanted   → Arcane Shot
+    -- No proc active → does nothing
+    HHT_API.SmartAmmoAction = function()
+        DEFAULT_CHAT_FRAME:AddMessage("|cFFABD473Hamingway's HunterTools:|r SmartAmmoAction not yet initialized", 1, 0, 0)
+        return "not_initialized"
+    end
+
     -- Smart Pet Management: Combines feed/dismiss/call/revive based on pet state
     -- Pet unhappy → Feed with selected food
     -- Pet happy → Dismiss pet
     -- No active pet → Call pet
     -- Pet dead → Revive pet
     -- NOTE: This function will be properly initialized after addon loads (see PLAYER_ENTERING_WORLD)
-    HamingwaysHunterTools_API.SmartPetAction = function()
+    HHT_API.SmartPetAction = function()
         DEFAULT_CHAT_FRAME:AddMessage("|cFFABD473Hamingway's HunterTools:|r SmartPetAction not yet initialized", 1, 0, 0)
         return "not_initialized"
     end
@@ -295,8 +174,20 @@ end
 -- Init API immediately (closure will access variables at runtime)
 InitAPI()
 
+-- Initialize SmartAmmoAction once at load time
+HHT_API.SmartAmmoAction = function()
+    local ammo = HHT_ProcState_Ammo and HHT_ProcState_Ammo() or 0
+    if ammo == 1 then
+        CastSpellByName("Multi-Shot")
+    elseif ammo == 2 then
+        CastSpellByName("Arcane Shot")
+    elseif ammo == 3 then
+        CastSpellByName("Serpent Sting")
+    end
+end
+
 -- MEMORY LEAK FIX: Initialize SmartPetAction once at load time (not on every event)
-HamingwaysHunterTools_API.SmartPetAction = function()
+HHT_API.SmartPetAction = function()
     if UnitExists("pet") and UnitIsDead("pet") then
         CastSpellByName("Revive Pet")
         DEFAULT_CHAT_FRAME:AddMessage("|cFFABD473Hamingway's HunterTools:|r Reviving pet...", 0.67, 0.83, 0.45)
@@ -484,7 +375,6 @@ local function GetConfig()
     HamingwaysHunterToolsDB = HamingwaysHunterToolsDB or {}
     HamingwaysHunterToolsDB.minimapPos = HamingwaysHunterToolsDB.minimapPos or 225
     HamingwaysHunterToolsDB.locked = HamingwaysHunterToolsDB.locked or false
-    HamingwaysHunterToolsDB.forceMode = HamingwaysHunterToolsDB.forceMode or "auto"  -- auto, vanilla, superwow
     HamingwaysHunterToolsDB.frameWidth = HamingwaysHunterToolsDB.frameWidth or DEFAULT_FRAME_WIDTH
     HamingwaysHunterToolsDB.frameHeight = HamingwaysHunterToolsDB.frameHeight or DEFAULT_FRAME_HEIGHT
     HamingwaysHunterToolsDB.borderSize = HamingwaysHunterToolsDB.borderSize or DEFAULT_BORDER_SIZE
@@ -685,6 +575,9 @@ local function GetConfig()
         procFramePoint       = HamingwaysHunterToolsDB.procFramePoint,
         procFrameX           = HamingwaysHunterToolsDB.procFrameX,
         procFrameY           = HamingwaysHunterToolsDB.procFrameY,
+        castbarPoint         = HamingwaysHunterToolsDB.castbarPoint,
+        castbarX             = HamingwaysHunterToolsDB.castbarX,
+        castbarY             = HamingwaysHunterToolsDB.castbarY,
     }
 end
 
@@ -979,15 +872,13 @@ local function ApplyFrameSettings()
         castFrame:SetBackdropColor(cfg.bgColor.r, cfg.bgColor.g, cfg.bgColor.b, cfg.bgOpacity)
         castFrame:SetBackdropBorderColor(br, bg, bb, ba)
         castFrame:ClearAllPoints()
-        -- Position castbar relative to autoshot timer if it's shown, otherwise to screen center
-        if cfg.showAutoShotTimer and frame:IsShown() then
+        -- Use saved position if user has explicitly placed the castbar
+        if cfg.castbarX and cfg.castbarY and cfg.castbarPoint then
+            castFrame:SetPoint(cfg.castbarPoint, UIParent, cfg.castbarPoint, cfg.castbarX, cfg.castbarY)
+        elseif cfg.showAutoShotTimer then
             castFrame:SetPoint("BOTTOM", frame, "TOP", 0, cfg.castbarSpacing)
         else
-            -- Position independently when autoshot timer is hidden
-            if not castFrame.independentPosition then
-                castFrame:SetPoint("CENTER", UIParent, "CENTER", 0, -200)
-                castFrame.independentPosition = true
-            end
+            castFrame:SetPoint("CENTER", UIParent, "CENTER", 0, -200)
         end
         -- Apply castbar module settings (bar texture, color, etc.)
         HHT_Castbar_ApplySettings()
@@ -2302,11 +2193,96 @@ local function CreateConfigFrame()
     -- Tab 1: AutoShot Timer settings
     local tab1 = tabContents[1]
     
-    -- Title
-    local title = configFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-    title:SetPoint("TOP", 0, -15)
-    title:SetText("|cFFABD473Hamingway's |r|cFFFFFF00HunterTools|r")
-    
+    -- ========== Welcome Frame ==========
+    local welcomeFrame = CreateFrame("Frame", nil, configFrame)
+    welcomeFrame:SetPoint("TOPLEFT", 16, -119)
+    welcomeFrame:SetWidth(288)
+    welcomeFrame:SetHeight(476)
+    welcomeFrame:SetFrameLevel(configFrame:GetFrameLevel() + 1)
+    welcomeFrame:EnableMouse(false)
+
+    local greetText = welcomeFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    greetText:SetPoint("TOP", 0, -10)
+    greetText:SetText("|cFFFFD100Ho there, fellow longshot!|r")
+
+    local portrait = welcomeFrame:CreateTexture(nil, "ARTWORK")
+    portrait:SetWidth(270)
+    portrait:SetHeight(270)
+    portrait:SetPoint("TOP", 0, -35)
+    portrait:SetTexture("Interface\\AddOns\\HamingwaysHunterTools\\images\\Hamingway.tga")
+
+    local aboutText = welcomeFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    aboutText:SetPoint("TOP", 0, -310)
+    aboutText:SetWidth(260)
+    aboutText:SetJustifyH("CENTER")
+    aboutText:SetText(
+        "Hi, my name is Hamingway the Hambringer.\n\n" ..
+        "Playing Hunter has been my long-time passion, and I built this addon to help fellow hunters master their craft.\n\n" ..
+        "Found a bug? Please report it on GitHub or reach out to me on Ambershire.\n\n" ..
+        "Addon development takes time \226\128\148 if this helped you, I'd love a coffee! \226\157\164"
+    )
+    aboutText:SetTextColor(0.85, 0.85, 0.85, 1)
+
+    local coffeeTitle = welcomeFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    coffeeTitle:SetPoint("TOP", 0, -440)
+    coffeeTitle:SetText("|cFFFFD100Buy me a Coffee:|r")
+
+    local coffeeBox = CreateFrame("EditBox", nil, welcomeFrame)
+    coffeeBox:SetPoint("TOP", 0, -460)
+    coffeeBox:SetWidth(260)
+    coffeeBox:SetHeight(22)
+    coffeeBox:SetFont("Fonts\\FRIZQT__.TTF", 11)
+    coffeeBox:SetJustifyH("CENTER")
+    coffeeBox:SetBackdrop({
+        bgFile = "Interface\\ChatFrame\\ChatFrameBackground",
+        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+        tile = true, tileSize = 16, edgeSize = 10,
+        insets = { left = 3, right = 3, top = 3, bottom = 3 }
+    })
+    coffeeBox:SetBackdropColor(0, 0, 0, 0.8)
+    coffeeBox:SetBackdropBorderColor(0.4, 0.4, 0.4, 1)
+    coffeeBox:SetAutoFocus(false)
+    coffeeBox:SetText("https://buymeacoffee.com/x1ndlmeister")
+    coffeeBox:SetScript("OnEscapePressed", function() this:ClearFocus() end)
+    coffeeBox:SetScript("OnEnterPressed", function() this:ClearFocus() end)
+    coffeeBox:SetScript("OnEditFocusGained", function() this:HighlightText() end)
+    coffeeBox:SetScript("OnChar", function() this:SetText("https://buymeacoffee.com/x1ndlmeister"); this:HighlightText() end)
+    coffeeBox:SetScript("OnTextChanged", function() if this:GetText() ~= "https://buymeacoffee.com/x1ndlmeister" then this:SetText("https://buymeacoffee.com/x1ndlmeister"); this:HighlightText() end end)
+
+    -- Title (clickable button to toggle welcome frame)
+    local titleBtn = CreateFrame("Button", nil, configFrame)
+    titleBtn:SetWidth(220)
+    titleBtn:SetHeight(20)
+    titleBtn:SetPoint("TOP", 0, -15)
+
+    local titleText = titleBtn:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    titleText:SetAllPoints()
+    titleText:SetText("|cFFABD473Hamingway's |r|cFFFFFF00HunterTools|r")
+
+    local function ShowWelcome()
+        welcomeFrame:Show()
+        for _, content in ipairs(tabContents) do content:Hide() end
+        for _, tab in ipairs(tabs) do tab:SetBackdropColor(0.1, 0.1, 0.1, 1) end
+    end
+
+    titleBtn:SetScript("OnClick", ShowWelcome)
+    titleBtn:SetScript("OnEnter", function()
+        titleText:SetText("|cFFFFFFFFHamingway's |r|cFFFFFF44HunterTools|r")
+    end)
+    titleBtn:SetScript("OnLeave", function()
+        titleText:SetText("|cFFABD473Hamingway's |r|cFFFFFF00HunterTools|r")
+    end)
+
+    -- Modify ShowTab to also hide welcome frame
+    local _origShowTab = ShowTab
+    ShowTab = function(tabIndex)
+        welcomeFrame:Hide()
+        _origShowTab(tabIndex)
+    end
+
+    -- Show welcome frame by default instead of tab 1
+    ShowWelcome()
+
     -- AutoShot Timer Title
     local autoShotTitle = tab1:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
     autoShotTitle:SetPoint("TOP", 0, -10)
@@ -2356,7 +2332,7 @@ local function CreateConfigFrame()
     -- Color buttons for Tab 1
     local reloadColorBtn = CreateColorButton("HamingwaysHunterToolsReloadColor", "Reload:", -235, "reloadColor", tab1)
     local aimingColorBtn = CreateColorButton("HamingwaysHunterToolsAimingColor", "Aiming:", -265, "aimingColor", tab1)
-    local bgColorBtn1 = CreateColorButton("HamingwaysHunterToolsBgColor1", "Hintergrund:", -295, "bgColor", tab1)
+    local bgColorBtn1 = CreateColorButton("HamingwaysHunterToolsBgColor1", "Background:", -295, "bgColor", tab1)
     
     -- Background Opacity for Tab 1
     local opacitySlider = CreateSlider("HamingwaysHunterToolsOpacitySlider", tab1, "BG Opacity", -340, 0, 1, 0.1, function()
@@ -2389,7 +2365,7 @@ local function CreateConfigFrame()
             castFrame:Hide()
         end
     end)
-    
+
     -- Castbar Spacing Slider
     local spacingSlider = CreateFrame("Slider", "HamingwaysHunterToolsSpacingSlider", tab2, "OptionsSliderTemplate")
     spacingSlider:SetPoint("TOPLEFT", 10, -85)
@@ -2633,21 +2609,28 @@ local function CreateConfigFrame()
     macroInfo:SetTextColor(0.8, 0.8, 0.8, 1)
     
     -- Copyable EditBox for Macro Text
-    local macroEditBox = CreateFrame("EditBox", nil, tab6, "InputBoxTemplate")
-    macroEditBox:SetPoint("TOPLEFT", 30, -470)
-    macroEditBox:SetWidth(250)
-    macroEditBox:SetHeight(30)
+    local macroEditBox = CreateFrame("EditBox", nil, tab6)
+    macroEditBox:SetPoint("TOP", 0, -468)
+    macroEditBox:SetWidth(270)
+    macroEditBox:SetHeight(22)
+    macroEditBox:SetFont("Fonts\\FRIZQT__.TTF", 11)
+    macroEditBox:SetJustifyH("CENTER")
+    macroEditBox:SetBackdrop({
+        bgFile = "Interface\\ChatFrame\\ChatFrameBackground",
+        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+        tile = true, tileSize = 16, edgeSize = 10,
+        insets = { left = 3, right = 3, top = 3, bottom = 3 }
+    })
+    macroEditBox:SetBackdropColor(0, 0, 0, 0.8)
+    macroEditBox:SetBackdropBorderColor(0.4, 0.4, 0.4, 1)
     macroEditBox:SetAutoFocus(false)
-    macroEditBox:SetText("/script HamingwaysHunterTools_API.SmartPetAction()")
-    macroEditBox:SetScript("OnEscapePressed", function()
-        this:ClearFocus()
-    end)
-    macroEditBox:SetScript("OnEnterPressed", function()
-        this:ClearFocus()
-    end)
-    macroEditBox:SetScript("OnEditFocusGained", function()
-        this:HighlightText()
-    end)
+    macroEditBox:SetText("/script HHT_API.SmartPetAction()")
+    macroEditBox:HighlightText(0, 0)
+    macroEditBox:SetScript("OnEscapePressed", function() this:ClearFocus() end)
+    macroEditBox:SetScript("OnEnterPressed", function() this:ClearFocus() end)
+    macroEditBox:SetScript("OnEditFocusGained", function() this:HighlightText() end)
+    macroEditBox:SetScript("OnChar", function() this:SetText("/script HHT_API.SmartPetAction()"); this:HighlightText() end)
+    macroEditBox:SetScript("OnTextChanged", function() if this:GetText() ~= "/script HHT_API.SmartPetAction()" then this:SetText("/script HHT_API.SmartPetAction()"); this:HighlightText() end end)
     
     -- ========== Tab 7: Melee Timer ==========
     local tab7 = tabContents[7]
@@ -3016,72 +2999,6 @@ local function CreateConfigFrame()
     appearanceInfo:SetText("|cFFFFFFFFAppearance Settings:|r\n\n• |cffFFFF00Lock frames|r prevents accidental dragging\n• |cffFFFF00Border size|r affects all frames\n• |cffFFFF00Bar Texture|r applies to all timer bars\n• |cffFFFF00Border Style|r changes frame borders\n\nChanges apply immediately to all bars:\nAutoShot, Castbar, Melee, Tranq")
     appearanceInfo:SetTextColor(0.8, 0.8, 0.8, 1)
     
-    -- Mode Selection (at end of appearance tab)
-    local modeLabel = tab10:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    modeLabel:SetPoint("TOPLEFT", 20, -395)
-    modeLabel:SetText("|cFFFFD100Detection Mode:|r")
-    
-    local modeDropdown = CreateFrame("Button", "HHT_ModeDropdown", tab10, "UIDropDownMenuTemplate")
-    modeDropdown:SetPoint("TOPLEFT", 10, -410)
-    UIDropDownMenu_SetWidth(150, modeDropdown)
-    
-    local modeDropdownText = getglobal(modeDropdown:GetName().."Text")
-    modeDropdownText:SetText("Auto (Detect)")
-    
-    UIDropDownMenu_Initialize(modeDropdown, function()
-        local modes = {
-            {text = "Auto (Detect)", value = "auto"},
-            {text = "Vanilla 1.12", value = "vanilla"},
-            {text = "SuperWoW", value = "superwow", disabled = not SUPERWOW_AVAILABLE}
-        }
-        for _, mode in ipairs(modes) do
-            local info = {}
-            info.text = mode.text
-            info.arg1 = mode.text  -- Store for callback
-            info.arg2 = mode.value  -- Store for callback
-            info.disabled = mode.disabled
-            info.func = function()
-                local selectedText = this.arg1 or info.arg1
-                local selectedValue = this.arg2 or info.arg2
-                
-                HamingwaysHunterToolsDB.forceMode = selectedValue
-                
-                -- Update dropdown text directly
-                local dropdownText = getglobal("HHT_ModeDropdownText")
-                if dropdownText then
-                    dropdownText:SetText(selectedText)
-                end
-                
-                -- Apply mode change
-                local success, msg = SetMode(selectedValue)
-                if success then
-                    DEFAULT_CHAT_FRAME:AddMessage("|cFF00FF00" .. msg)
-                else
-                    DEFAULT_CHAT_FRAME:AddMessage("|cFFFF6666Error: " .. msg .. "|r")
-                end
-                
-                -- Update status text
-                if modeStatus then
-                    local activeMode = HAS_SUPERWOW and "|cFF00FF00SuperWoW|r" or "|cFFFFFF00Vanilla|r"
-                    local availableText = SUPERWOW_AVAILABLE and "SuperWoW" or "Vanilla"
-                    modeStatus:SetText("|cFFAAAAAAActive:|r " .. activeMode .. "  |cFFAAAAAAAvailable:|r " .. availableText)
-                end
-                
-                InvalidateConfigCache()
-            end
-            UIDropDownMenu_AddButton(info)
-        end
-    end)
-    
-    -- Mode Status Text
-    local modeStatus = tab10:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    modeStatus:SetPoint("TOPLEFT", 20, -445)
-    modeStatus:SetWidth(250)
-    modeStatus:SetJustifyH("LEFT")
-    local activeMode = HAS_SUPERWOW and "|cFF00FF00SuperWoW|r" or "|cFFFFFF00Vanilla|r"
-    local availableText = SUPERWOW_AVAILABLE and "SuperWoW" or "Vanilla"
-    modeStatus:SetText("|cFFAAAAAAActive:|r " .. activeMode .. "  |cFFAAAAAAAvailable:|r " .. availableText)
-    
     -- Close Button
     local closeBtn = CreateFrame("Button", nil, configFrame, "UIPanelButtonTemplate")
     closeBtn:SetWidth(80)
@@ -3144,9 +3061,6 @@ local function CreateConfigFrame()
     configFrame.borderSlider = borderSlider
     configFrame.barStyleDropdown = barStyleDropdown
     configFrame.borderStyleDropdown = borderStyleDropdown
-    configFrame.modeDropdown = modeDropdown
-    configFrame.modeDropdownText = modeDropdownText
-    configFrame.modeStatus = modeStatus
 
     -- ========== Tab 11: Proc Frame ==========
     local tab11 = tabContents[11]
@@ -3207,20 +3121,45 @@ local function CreateConfigFrame()
         if HHT_ProcFrame_ApplyIconSize then HHT_ProcFrame_ApplyIconSize(val) end
     end)
 
-    -- Info Text
-    local procInfo = tab11:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    procInfo:SetPoint("TOPLEFT", 10, -280)
-    procInfo:SetWidth(270)
-    procInfo:SetJustifyH("LEFT")
-    procInfo:SetText(
-        "|cFFFFFFFFProc Frame:|r Shows hunter procs from Turtle WoW 1.18.1 talents.\n\n" ..
-        "|cFF00CCFFLock and Load|r - Resets Aimed Shot CD on ranged crits (10 sec).\n\n" ..
-        "|cFFFF8800Experimental Ammo|r - 3 variants cycling after Aimed Shot.\n\n" ..
-        "|cFFFFFF00Requires SuperWoW.|r\n\n" ..
-        "Use |cFFFFFF00/hht proc scan|r while buffs are active to discover the buff textures " ..
-        "and update the constants in ProcFrame.lua."
+    -- All-in-One Macro Info Box
+    local ammoMacroTitle = tab11:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    ammoMacroTitle:SetPoint("TOPLEFT", 20, -385)
+    ammoMacroTitle:SetText("|cFFFFD100All-in-One Ammo Macro|r")
+
+    local ammoMacroInfo = tab11:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    ammoMacroInfo:SetPoint("TOPLEFT", 20, -405)
+    ammoMacroInfo:SetWidth(270)
+    ammoMacroInfo:SetJustifyH("LEFT")
+    ammoMacroInfo:SetText(
+        "Fires the correct spell based on active ammo proc:\n" ..
+        "|cFFFF6600Explosive|r \226\134\146 Multi-Shot\n" ..
+        "|cFF00FF00Poisonous|r \226\134\146 Serpent Sting\n" ..
+        "|cFF8888FFEnchanted|r \226\134\146 Arcane Shot"
     )
-    procInfo:SetTextColor(0.8, 0.8, 0.8, 1)
+    ammoMacroInfo:SetTextColor(0.8, 0.8, 0.8, 1)
+
+    local ammoMacroEditBox = CreateFrame("EditBox", nil, tab11)
+    ammoMacroEditBox:SetPoint("TOP", 0, -468)
+    ammoMacroEditBox:SetWidth(270)
+    ammoMacroEditBox:SetHeight(22)
+    ammoMacroEditBox:SetFont("Fonts\\FRIZQT__.TTF", 11)
+    ammoMacroEditBox:SetJustifyH("CENTER")
+    ammoMacroEditBox:SetBackdrop({
+        bgFile = "Interface\\ChatFrame\\ChatFrameBackground",
+        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+        tile = true, tileSize = 16, edgeSize = 10,
+        insets = { left = 3, right = 3, top = 3, bottom = 3 }
+    })
+    ammoMacroEditBox:SetBackdropColor(0, 0, 0, 0.8)
+    ammoMacroEditBox:SetBackdropBorderColor(0.4, 0.4, 0.4, 1)
+    ammoMacroEditBox:SetAutoFocus(false)
+    ammoMacroEditBox:SetText("/script HHT_API.SmartAmmoAction()")
+    ammoMacroEditBox:HighlightText(0, 0)
+    ammoMacroEditBox:SetScript("OnEscapePressed", function() this:ClearFocus() end)
+    ammoMacroEditBox:SetScript("OnEnterPressed", function() this:ClearFocus() end)
+    ammoMacroEditBox:SetScript("OnEditFocusGained", function() this:HighlightText() end)
+    ammoMacroEditBox:SetScript("OnChar", function() this:SetText("/script HHT_API.SmartAmmoAction()"); this:HighlightText() end)
+    ammoMacroEditBox:SetScript("OnTextChanged", function() if this:GetText() ~= "/script HHT_API.SmartAmmoAction()" then this:SetText("/script HHT_API.SmartAmmoAction()"); this:HighlightText() end end)
 
     -- Store references on configFrame for OnShow handler
     configFrame.enableProcCheck      = enableProcCheck
@@ -3310,22 +3249,6 @@ local function CreateConfigFrame()
             UIDropDownMenu_SetText(borderName, this.borderStyleDropdown)
         end
         
-        -- Update mode dropdown and status (Tab 10)
-        if this.modeDropdownText and cfg.forceMode then
-            local modeText = "Auto (Detect)"
-            if cfg.forceMode == "vanilla" then
-                modeText = "Vanilla 1.12"
-            elseif cfg.forceMode == "superwow" then
-                modeText = "SuperWoW"
-            end
-            this.modeDropdownText:SetText(modeText)
-        end
-        if this.modeStatus then
-            local activeMode = HAS_SUPERWOW and "|cFF00FF00SuperWoW|r" or "|cFFFFFF00Vanilla|r"
-            local availableText = SUPERWOW_AVAILABLE and "SuperWoW" or "Vanilla"
-            this.modeStatus:SetText("|cFFAAAAAAActive:|r " .. activeMode .. "  |cFFAAAAAAAvailable:|r " .. availableText)
-        end
-
         -- Tab 11: Proc Frame
         if this.enableProcCheck then
             this.enableProcCheck:SetChecked(cfg.procFrameEnabled)
@@ -3358,6 +3281,7 @@ local function CreateConfigFrame()
         end
         
         ShowConfigPreview()
+        ShowWelcome()
     end)
     
     configFrame:SetScript("OnHide", function()
@@ -3571,12 +3495,21 @@ local function CreateUI()
     end)
     castFrame:SetScript("OnDragStop", function()
         this:StopMovingOrSizing()
-        castFrame.independentPosition = true
+        local point, _, _, xOfs, yOfs = this:GetPoint()
+        if point and xOfs and yOfs then
+            HamingwaysHunterToolsDB = HamingwaysHunterToolsDB or {}
+            HamingwaysHunterToolsDB.castbarPoint = point
+            HamingwaysHunterToolsDB.castbarX = xOfs
+            HamingwaysHunterToolsDB.castbarY = yOfs
+            InvalidateConfigCache()
+        end
     end)
     
     castFrame:SetScript("OnUpdate", function()
-        if HHT_Core.isCasting and not HHT_Core.previewMode then
-            HHT_Castbar_UpdateCastbar()
+        if not HHT_Core.previewMode then
+            if HHT_Core.isCasting or HHT_Castbar_IsFlashing and HHT_Castbar_IsFlashing() then
+                HHT_Castbar_UpdateCastbar()
+            end
         end
     end)
     
@@ -3672,16 +3605,23 @@ AH:RegisterEvent("PLAYER_REGEN_ENABLED")
 AH:RegisterEvent("PLAYER_REGEN_DISABLED")
 AH:RegisterEvent("ADDON_LOADED")
 AH:RegisterEvent("PLAYER_LOGOUT")
--- Note: UNIT_CASTEVENT registered later in DetectSuperWoW() if available
+-- Note: UNIT_CASTEVENT registered dynamically (only during shooting or when melee timer is active)
 -- PLAYER_AURAS_CHANGED: Conditionally registered (only when Pet Feeder or Warnings enabled)
 -- PERFORMANCE: These events registered dynamically only when needed:
--- ITEM_LOCK_CHANGED, UNIT_INVENTORY_CHANGED: Only during shooting
+-- UNIT_INVENTORY_CHANGED: Only during shooting
 -- UI_ERROR_MESSAGE, CHAT_MSG_SPELL_PERIODIC_SELF_BUFFS: Only when buff bar enabled
 -- UNIT_HAPPINESS, UNIT_PET, PET_BAR_UPDATE, PLAYER_TARGET_CHANGED: Only when pet feeder enabled
--- Melee timer uses combat state polling (no combat log events needed - raid optimized)
+-- Melee timer uses UNIT_CASTEVENT MAINHAND events (SuperWoW, raid optimized)
 
 -- ============ Event Handler Functions (split to reduce upvalues) ============
 local function HandleAddonLoaded()
+    -- SuperWoW is required for this addon to function
+    if not GetPlayerBuffID then
+        DEFAULT_CHAT_FRAME:AddMessage("|cFFFF0000Hamingway's HunterTools: SuperWoW nicht gefunden! Addon deaktiviert.|r", 1, 0, 0)
+        AH:UnregisterAllEvents()
+        return
+    end
+
     local _, playerClass = UnitClass("player")
     if playerClass and playerClass ~= "HUNTER" then
         isHunter = false
@@ -3719,6 +3659,16 @@ local function HandleAddonLoaded()
     if statsFrame then UpdateStatsDisplay() end
     if HHT_PetFeedFrame then HHT_PetFeeder_UpdateDisplay() end
     
+    -- Register UNIT_CASTEVENT permanently so the castbar works outside combat
+    -- (without this it only worked when Auto-Shot was active)
+    if not PLAYER_GUID and UnitExists then
+        local exists, guid = UnitExists("player")
+        PLAYER_GUID = guid
+    end
+    if PLAYER_GUID then
+        AH:RegisterEvent("UNIT_CASTEVENT")
+    end
+    
     -- Initialize NotifyCastAuto API after addon is fully loaded
     HHT_Castbar_InitNotifyCastAutoAPI()
 end
@@ -3744,7 +3694,6 @@ local function HandlePlayerEnteringWorld()
     end
     
     -- Detect SuperWoW right before showing loaded message
-    DetectSuperWoW()
     
     if not loadedMessageShown then
         DEFAULT_CHAT_FRAME:AddMessage("|cFFABD473Hamingway's |r|cFFFFFF00HunterTools |r(" .. VERSION .. ") loaded")
@@ -3802,23 +3751,19 @@ end
 local function HandleAutoShotStart()
     -- Register performance-critical events (only active during shooting)
     HHT_AutoShot_HandleAutoShotStart()
-    if HAS_SUPERWOW then
-        -- SuperWoW: Register UNIT_CASTEVENT for AutoShot detection
-        if not PLAYER_GUID and UnitExists then
-            local exists, guid = UnitExists("player")  -- SuperWoW returns exists, GUID
-            PLAYER_GUID = guid
+    -- SuperWoW: Register UNIT_CASTEVENT for AutoShot + cast detection
+    if not PLAYER_GUID and UnitExists then
+        local exists, guid = UnitExists("player")  -- SuperWoW returns exists, GUID
+        PLAYER_GUID = guid
+    end
+    if PLAYER_GUID then
+        AH:RegisterEvent("UNIT_CASTEVENT")
+        -- Track registration for coordination with melee timer
+        local state = HHT_AutoShot_GetState()
+        if state then
+            state.registeredEvents = state.registeredEvents or {}
+            state.registeredEvents["UNIT_CASTEVENT"] = true
         end
-        if PLAYER_GUID then
-            AH:RegisterEvent("UNIT_CASTEVENT")
-            -- Track registration for coordination with melee timer
-            local state = HHT_AutoShot_GetState()
-            if state then
-                state.registeredEvents = state.registeredEvents or {}
-                state.registeredEvents["UNIT_CASTEVENT"] = true
-            end
-        end
-    else
-        AH:RegisterEvent("ITEM_LOCK_CHANGED")  -- Vanilla: Only ITEM_LOCK_CHANGED
     end
     AH:RegisterEvent("UNIT_INVENTORY_CHANGED")
     UpdateFrameVisibility()
@@ -3826,19 +3771,11 @@ end
 
 local function HandleAutoShotStop()
     HHT_AutoShot_HandleAutoShotStop()
-    -- Unregister performance-critical events when not shooting
-    -- But keep UNIT_CASTEVENT if melee timer is active
+    -- UNIT_CASTEVENT stays permanently registered (needed for out-of-combat cast detection)
     local state = HHT_AutoShot_GetState()
-    if HAS_SUPERWOW then
-        if not (state and state.useMeleeTimer) then
-            AH:UnregisterEvent("UNIT_CASTEVENT")  -- SuperWoW: Unregister if not in melee mode
-            if state then
-                state.registeredEvents = state.registeredEvents or {}
-                state.registeredEvents["UNIT_CASTEVENT"] = nil
-            end
-        end
-    else
-        AH:UnregisterEvent("ITEM_LOCK_CHANGED")  -- Vanilla: Only ITEM_LOCK_CHANGED
+    if state then
+        state.registeredEvents = state.registeredEvents or {}
+        state.registeredEvents["UNIT_CASTEVENT"] = true  -- keep tracking
     end
     AH:UnregisterEvent("UNIT_INVENTORY_CHANGED")
     UpdateFrameVisibility()
@@ -3877,37 +3814,6 @@ local function HandleBuffGained(message)
     end
 end
 
-local function HandleItemLockChanged()
-    -- SuperWoW: Skip ITEM_LOCK_CHANGED entirely - we use UNIT_CASTEVENT instead (maximum performance!)
-    if HAS_SUPERWOW and PLAYER_GUID then
-        return  -- Early exit - no processing needed
-    end
-    
-    -- Vanilla: Use ITEM_LOCK_CHANGED with GCD filtering
-    local currentTime = GetTime()
-    if currentTime - lastSpellCastTime < 0.3 then
-        if HHT_DEBUG then
-            DEFAULT_CHAT_FRAME:AddMessage("ITEM_LOCK filtered: recent spell cast", 1, 0.5, 0)
-        end
-        return  -- Don't use ITEM_LOCK for Auto-Shot on SuperWoW
-    end
-    
-    -- Vanilla fallback: Use standard ITEM_LOCK_CHANGED detection
-    local currentTime = GetTime()
-    if currentTime - lastInstantShotTime < 0.5 then
-        -- This ITEM_LOCK_CHANGED is from an instant shot, ignore it
-        return
-    end
-    
-    -- This is a real auto shot - check if we're actually shooting
-    local state = HHT_AutoShot_GetState()
-    if state and state.isShooting then
-        if HHT_DEBUG then
-            DEFAULT_CHAT_FRAME:AddMessage("Auto-Shot detected via ITEM_LOCK_CHANGED (Vanilla)", 0, 1, 0)
-        end
-        HHT_AutoShot_OnShotFired()
-    end
-end
 local function HandlePetEvents()
     -- PERFORMANCE: Direct DB access, no config table creation
     if not HamingwaysHunterToolsDB or not HamingwaysHunterToolsDB.showPetFeeder then
@@ -3941,13 +3847,12 @@ local function HandlePlayerTargetChanged()
     
     -- WORKAROUND: WoW 1.10+ requires DropItemOnUnit() to be called from a player-initiated event
     -- This is the same approach used by PetFeeder addon (see PetFeederFrame.lua line 629)
-    -- Block auto-feed when player is mounted (Turtle WoW)
-    if UnitExists("pet") and not IsPlayerMounted() then
+    -- Block auto-feed when player is mounted or in combat
+    if UnitExists("pet") and not IsPlayerMounted() and not UnitAffectingCombat("player") then
         local happiness = GetPetHappiness()
-        local hasFeedEffect = HHT_PetFeeder_HasFeedEffect()
-        -- Only attempt feed if pet needs it and we haven't tried recently (prevent spam)
         local currentTime = GetTime()
-        if (happiness == 1 or happiness == 2) and not hasFeedEffect then
+        -- FeedPet() itself checks HasFeedEffect() and the 1s post-feed buffer
+        if happiness == 1 or happiness == 2 then
             if currentTime - HHT_PetFeedFrame.lastAutoFeedAttempt >= 2 then  -- 2 second cooldown
                 HHT_PetFeedFrame.lastAutoFeedAttempt = currentTime
                 HHT_PetFeeder_FeedPet(true)  -- silent mode (no error messages)
@@ -4033,8 +3938,6 @@ AH:SetScript("OnEvent", function()
         HandleAurasChanged()
     elseif event == "UNIT_INVENTORY_CHANGED" and arg1 == "player" then
         HandleInventoryChanged()
-    elseif event == "ITEM_LOCK_CHANGED" then
-        HandleItemLockChanged()
     elseif event == "UNIT_CASTEVENT" then
         HHT_Castbar_HandleUnitCastEvent()
     elseif event == "PLAYER_REGEN_DISABLED" then
@@ -4087,55 +3990,18 @@ SlashCmdList["HamingwaysHunterTools"] = function(msgArg)
         HHT_DEBUG = not HHT_DEBUG
         print("HamingwaysHunterTools Debug: " .. (HHT_DEBUG and "ENABLED" or "DISABLED"))
         if HHT_DEBUG then
-            print("Debug info: shooting=" .. tostring(isShooting) .. " reload=" .. tostring(isReloading) .. " speed=" .. tostring(weaponSpeed))
-            local currentMode = HamingwaysHunterToolsDB.forceMode or "auto"
-            print("Mode: " .. currentMode .. " | Active: " .. (HAS_SUPERWOW and "SuperWoW" or "Vanilla") .. " | Available: " .. tostring(SUPERWOW_AVAILABLE))
-            print("SuperWoW API: " .. tostring(SUPERWOW_AutoShotAPI or "none"))
-        end
-    elseif string.find(msgLower, "^mode") then
-        local args = {}
-        for word in string.gmatch(msgArg, "%S+") do
-            table.insert(args, string.lower(word))
-        end
-        
-        if table.getn(args) == 1 then
-            -- Show current mode
-            local currentMode = HamingwaysHunterToolsDB.forceMode or "auto"
-            local activeMode = HAS_SUPERWOW and "SuperWoW" or "Vanilla"
-            local availableMode = SUPERWOW_AVAILABLE and "SuperWoW" or "Vanilla"
-            print("|cFFABD473=== HHT Mode Status ===")
-            print("|cFFFFFFFFConfig Mode:|r " .. currentMode)
-            print("|cFFFFFFFFActive Mode:|r " .. activeMode)
-            print("|cFFFFFFFFAvailable:|r " .. availableMode .. " (hardware detection)")
-            print("|cFFFFFF00Usage:|r /hht mode <auto|vanilla|superwow>")
-        else
-            local newMode = args[2]
-            local success, msg = SetMode(newMode)
-            if success then
-                print("|cFF00FF00" .. msg)
-                print("|cFFFFFF00Reload UI (/reload) for full effect|r")
-            else
-                print("|cFFFF6666Error: " .. msg .. "|r")
-            end
+            print("Debug info: SuperWoW required (GetPlayerBuffID detected)")
+            print("GetPlayerBuffID: " .. tostring(GetPlayerBuffID ~= nil))
+            print("GetPlayerBuffTimeLeft: " .. tostring(GetPlayerBuffTimeLeft ~= nil))
+            print("UNIT_CASTEVENT: active")
         end
     elseif msgLower == "superwow" then
         print("=== SuperWoW API Check ===")
-        print("SUPERWOW_VERSION: " .. tostring(SUPERWOW_VERSION))
-        print("SUPERWOW_STRING: " .. tostring(SUPERWOW_STRING))
         print("GetPlayerBuffID: " .. tostring(GetPlayerBuffID ~= nil))
         print("GetPlayerBuffTimeLeft: " .. tostring(GetPlayerBuffTimeLeft ~= nil))
         print("SpellInfo: " .. tostring(SpellInfo ~= nil))
-        print("UNIT_CASTEVENT: registered")
         local version = GetBuildInfo and GetBuildInfo()
         print("Build Info: " .. tostring(version or "unknown"))
-        print("")
-        print("Detected Features:")
-        print("  SUPERWOW_AVAILABLE: " .. tostring(SUPERWOW_AVAILABLE))
-        print("  HAS_SUPERWOW (active): " .. tostring(HAS_SUPERWOW))
-        print("  Auto-Shot API: " .. tostring(SUPERWOW_AutoShotAPI or "none"))
-        print("  Buff API: " .. tostring(SUPERWOW_BuffAPI or "none"))
-        print("")
-        print("Mode: " .. (HamingwaysHunterToolsDB.forceMode or "auto"))
     elseif msgLower == "stats" or msgLower == "resetstats" then
         ResetStats()
     elseif msgLower == "resetwarnings" then
@@ -4148,11 +4014,24 @@ SlashCmdList["HamingwaysHunterTools"] = function(msgArg)
         if HHT_ProcFrame_Scan then
             HHT_ProcFrame_Scan()
         else
-            print("HHT: Proc Frame not initialized (SuperWoW required)")
+            print("HHT: Proc Frame not initialized")
+        end
+    elseif msgLower == "petbuffs" then
+        if not UnitExists("pet") then
+            print("HHT: No pet active")
+        else
+            print("=== Pet Buffs ===")
+            local found = false
+            for i = 1, 32 do
+                local tex = UnitBuff("pet", i)
+                if not tex then break end
+                print("  [" .. i .. "] " .. tex)
+                found = true
+            end
+            if not found then print("  (no buffs)") end
         end
     else
         print("HHT Commands:")
-        print("  /hht mode [auto|vanilla|superwow] - Switch between modes")
         print("  /hht config - Toggle config window")
         print("  /hht lock/unlock - Lock/unlock frame")
         print("  /hht reset - Reset timer")
@@ -4162,10 +4041,8 @@ SlashCmdList["HamingwaysHunterTools"] = function(msgArg)
         print("  /hht stats - Reset statistics")
         print("  /hht resetwarnings - Reset warning position")
         print("  /hht proc scan - Scan active buffs (for proc frame setup)")
-        print("")
-        local currentMode = HamingwaysHunterToolsDB.forceMode or "auto"
-        local activeMode = HAS_SUPERWOW and "SuperWoW" or "Vanilla"
-        print("|cFFABD473Current Mode:|r " .. currentMode .. " (Active: " .. activeMode .. ")")
+        print("  /hht petbuffs - List all pet buff textures")
+        print("|cFFABD473SuperWoW required|r")
     end
 end
 
