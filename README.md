@@ -13,7 +13,7 @@ A comprehensive, feature-rich Hunter addon for World of Warcraft Classic (1.12) 
 
 ### Proc Frame *(requires SuperWoW)*
 
-![Proc Frame](images/procframe.png)
+![Proc Frame](images/proc-frame.png)
 
 - **Lock and Load** — tracks remaining duration, triggers LazyHunt Aimed Shot replacement
 - **Experimental Ammunition** — detects all three variants and shows which spell to cast:
