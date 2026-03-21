@@ -45,42 +45,10 @@ local function GetCore()
     return HHT_Core
 end
 
-local function GetBaseWeaponSpeed()
-    if HHT_Core and HHT_Core.GetBaseWeaponSpeed then
-        return HHT_Core.GetBaseWeaponSpeed()
-    end
-    -- Fallback
-    local currentSpeed = UnitRangedDamage("player")
-    return currentSpeed or 2.0
-end
-
 -- Forward declarations
 local UpdateCastbar
 local StartCast
 local HandleCastAttempt
-
--- ============ Cast Time Calculation ============
-local function CalcCastTime(spellName)
-    local meta = HHT_castSpells[spellName]
-    if not meta then
-        -- Strip rank suffix so "Aimed Shot (Rank 9)" matches ["Aimed Shot"]
-        -- Also handles German "Rang" via the generic " %(" strip
-        local baseName = string.match(spellName, "^(.+) %(") or ""
-        meta = HHT_castSpells[baseName]
-    end
-    if not meta then return nil end
-    
-    if meta.Haste == "range" then
-        local speedCurrent = UnitRangedDamage("player") or 2.0
-        local speedWeapon = GetBaseWeaponSpeed()
-        local speedMultiplier = speedCurrent / speedWeapon
-        local casttime = (meta.Offset + meta.Time * speedMultiplier) / 1000
-        return casttime
-    else
-        -- No haste
-        return (meta.Offset + meta.Time) / 1000
-    end
-end
 
 -- Hide spark and shine (shared cleanup helper)
 local function HideCastbarEffects()
@@ -270,27 +238,8 @@ end
 -- ============ Cast Detection ============
 -- Handle cast attempt (validates cast is actually happening)
 HandleCastAttempt = function(spellName, isCurrentAction)
-    if not spellName or not HHT_castSpells[spellName] then return end
-    
-    local castTime = CalcCastTime(spellName)
-    if not castTime or castTime <= 0 then return end
-    
-    -- For castable shots: verify cast is actually happening
-    if isCurrentAction then
-        -- Cast confirmed via IsCurrentAction
-        StartCast(spellName, castTime)
-    else
-        -- Cast from spellbook/macro: check if spell is on action bars
-        local slot = FindActionSlotBySpellName(spellName)
-        if not slot then
-            -- Spell not on action bars, can't verify cast - skip it
-            return
-        end
-        -- Check if this action is now active (casting)
-        if IsCurrentAction(slot) then
-            StartCast(spellName, castTime)
-        end
-    end
+    -- SuperWoW: UNIT_CASTEVENT handles cast detection; this is a no-op.
+    return
 end
 
 -- Hook UseAction to detect casts from action bars
@@ -434,12 +383,14 @@ function HHT_Castbar_HandleUnitCastEvent()
     if eventType == "START" and castDurationMS and castDurationMS > 0 then
         -- Cast started.
         -- castDurationMS is the BASE duration from the server (WITHOUT haste).
-        -- We use CalcCastTime() instead, which applies the current ranged haste multiplier,
-        -- so the bar matches the actual (hasted) cast duration.
-        -- Fallback to castDurationMS if spell is not in our database.
+        -- Apply hasteMultiplier so the bar matches the actual (hasted) cast duration.
+        local hasteMultiplier = 1.0
+        if HHT_AutoShot_GetState then
+            local s = HHT_AutoShot_GetState()
+            if s then hasteMultiplier = s.hasteMultiplier or 1.0 end
+        end
         local spellNameForCast = KNOWN_SPELL_NAMES[spellID] or ("Spell " .. spellID)
-        local calculatedTime = CalcCastTime(spellNameForCast)
-        local duration = calculatedTime or (castDurationMS / 1000)
+        local duration = (castDurationMS / 1000) * hasteMultiplier
         HHT_Core.isCasting = true
         CastbarState.castSpellID = spellID
         CastbarState.castStartTime = GetTime()
@@ -622,14 +573,7 @@ end
 
 function HHT_Castbar_InitNotifyCastAutoAPI()
     HHT_API.NotifyCastAuto = function(spellName)
-        if not spellName or not HHT_castSpells[spellName] then 
-            return false 
-        end
-        local castTime = CalcCastTime(spellName)
-        if castTime and castTime >= 0 then  -- Changed: Allow instant casts (castTime = 0)
-            StartCast(spellName, castTime)
-            return true
-        end
+        -- SuperWoW: UNIT_CASTEVENT handles cast detection; no manual notification needed.
         return false
     end
 end
