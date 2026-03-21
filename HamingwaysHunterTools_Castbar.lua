@@ -50,7 +50,8 @@ local function GetBaseWeaponSpeed()
         return HHT_Core.GetBaseWeaponSpeed()
     end
     -- Fallback
-    return 2.0
+    local currentSpeed = UnitRangedDamage("player")
+    return currentSpeed or 2.0
 end
 
 -- Forward declarations
@@ -70,12 +71,10 @@ local function CalcCastTime(spellName)
     if not meta then return nil end
     
     if meta.Haste == "range" then
-        local hasteMultiplier = 1.0
-        if HHT_AutoShot_GetState then
-            local s = HHT_AutoShot_GetState()
-            if s then hasteMultiplier = s.hasteMultiplier or 1.0 end
-        end
-        local casttime = (meta.Offset + meta.Time * hasteMultiplier) / 1000
+        local speedCurrent = UnitRangedDamage("player") or 2.0
+        local speedWeapon = GetBaseWeaponSpeed()
+        local speedMultiplier = speedCurrent / speedWeapon
+        local casttime = (meta.Offset + meta.Time * speedMultiplier) / 1000
         return casttime
     else
         -- No haste
