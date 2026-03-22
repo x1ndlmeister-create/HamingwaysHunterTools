@@ -9,6 +9,22 @@ print("[HHT] Loading ProcFrame.lua")
 -- Module frame
 local ProcModule = CreateFrame("Frame", "HamingwaysHunterToolsProcModule")
 
+-- ============ Kill Command spell name (locale-aware) ============
+-- Read once at load time; works for all client locales.
+local KC_SPELL_NAME = GetSpellInfo and GetSpellInfo(34026) or "Kill Command"
+if not KC_SPELL_NAME or KC_SPELL_NAME == "" then
+    KC_SPELL_NAME = "Kill Command"  -- English fallback
+end
+
+-- Keybind helper: returns the first binding key for a spell name, or nil
+-- Uses GetBindingKey which may not exist in all WoW builds; guarded accordingly.
+local function GetSpellKeybind(spellName)
+    if not spellName or spellName == "" then return nil end
+    if not GetBindingKey then return nil end
+    local ok, key = pcall(GetBindingKey, "SPELL " .. spellName)
+    return ok and key or nil
+end
+
 -- ============ ALL State in ONE table to avoid upvalue limit ============
 local ProcState = {
     -- Frame references
@@ -25,13 +41,17 @@ local ProcState = {
     ammoIcon    = nil,
     ammoGlow    = nil,
     ammoTimer   = nil,
-    ammoLabel   = nil,  -- spell name hint shown to the right of the icon
+    -- Cached spell icon textures (filled from spellbook at init)
+    ammoSpellIconExplosive = nil,
+    ammoSpellIconPoisonous = nil,
+    ammoSpellIconEnchanted = nil,
 
     -- Lock and Load detection state
     lnlActive    = false,
     lnlSlot      = 0,    -- 0-based GetPlayerBuff index (same index for GetPlayerBuffTimeLeft)
     lnlBuffId    = 0,    -- buffId from GetPlayerBuff (for GetPlayerBuffTexture)
     lnlExpireTime = 0,   -- GetTime() value when LnL expires (refreshed every scan to handle slot-drift)
+    lnlNPExpireTime = 0, -- Nampower AURA_CAST_ON_SELF: server-accurate expireTime (overrides API read)
 
     -- Experimental Ammo detection state
     ammoActive    = false,
@@ -39,6 +59,25 @@ local ProcState = {
     ammoIsDebuff  = true,   -- Experimental Ammo appears as player debuff, not buff
     ammoType      = nil,    -- "explosive" | "poisonous" | "enchanted"
     ammoExpireTime = 0,     -- GetTime() value when ammo expires (set at detection)
+
+    -- Kill Command state
+    kcBg          = nil,
+    kcIcon        = nil,
+    kcGlow        = nil,
+    kcTimer       = nil,
+    kcReady       = false,  -- true when KC is off cooldown
+    kcCooldownEnd = 0,      -- GetTime() when CD expires
+    kcSpellSlot   = nil,    -- spell book slot index for KC (cached at init for GetSpellCooldown)
+    kcActionSlot  = nil,    -- action bar slot# for KC (for IsUsableAction - mirrors what action bar shows)
+
+    -- Ammo spell CD overlay
+    ammoSpellCdTimer        = nil,  -- FontString for spell cooldown text on spell icon
+    ammoSpellSlotExplosive  = nil,  -- spellbook slot# for Multi-Shot
+    ammoSpellSlotPoisonous  = nil,  -- spellbook slot# for Serpent Sting
+    ammoSpellSlotEnchanted  = nil,  -- spellbook slot# for Arcane Shot
+
+    -- Preview mode (config open)
+    previewMode   = false,
 
     -- Pulse animation
     pulsePhase  = 0,
@@ -122,6 +161,7 @@ local MAX_BUFF_SLOTS = 40
 -- (UnitBuff can return nil mid-list when a buff was removed, breaking while-loops)
 -- force=true bypasses the poll throttle (used by events for instant response)
 local function ScanProcs(force)
+    if ProcState.previewMode then return end
     local now = GetTime()
     if not force and (now - ProcState.lastScan < ProcState.SCAN_THROTTLE) then return end
     ProcState.lastScan = now
@@ -232,7 +272,8 @@ local function ScanProcs(force)
     -- Caching caused a 1-in-10 wrong-value bug: when LnL and Ammo proc together, GetPlayerBuffTimeLeft
     -- could return the previous buff's stale time (~60s) on the first scan and lock it in.
     if not ProcState.lnlActive then
-        ProcState.lnlExpireTime = 0  -- reset on deactivation
+        ProcState.lnlExpireTime   = 0  -- reset on deactivation
+        ProcState.lnlNPExpireTime = 0  -- also clear Nampower value (buff is gone)
     end
 
     -- Ammo: use fixed known duration (GetPlayerDebuffTimeLeft unavailable)
@@ -246,11 +287,12 @@ end
 -- ============ Icon Slot Update Helper ============
 -- Updates one icon slot: bg, icon texture, glow, timer text.
 -- isActive:    bool - is this proc currently up?
--- slot:        buff slot index (for time remaining)
--- liveTexture: texture retieved from UnitBuff (may be nil)
+-- expireTime:  GetTime() when proc expires (0 = unknown/no timer)
+-- liveTexture: texture retrieved from UnitBuff (may be nil)
 -- fallback:    icon path when liveTexture is nil
 -- pulseAlpha:  current sine value 0..1 for glow
-local function UpdateIconSlot(bg, icon, glow, timer, isActive, expireTime, liveTexture, fallback, pulseAlpha)
+-- showDimmed:  when true and inactive, show slot with dimmed icon instead of hiding
+local function UpdateIconSlot(bg, icon, glow, timer, isActive, expireTime, liveTexture, fallback, pulseAlpha, showDimmed)
     if not bg then return end
 
     if isActive then
@@ -283,16 +325,49 @@ local function UpdateIconSlot(bg, icon, glow, timer, isActive, expireTime, liveT
             timer:SetText("!")
             timer:SetTextColor(1, 1, 0, 1)
         end
-    else
-        -- Inactive: show dimmed fallback icon
+        bg:Show()
+    elseif showDimmed then
+        -- Show always mode: show slot with dimmed icon so the frame is visible
         icon:SetTexture(fallback)
         icon:SetAlpha(0.15)
         if glow then glow:SetAlpha(0) end
         timer:SetText("")
+        bg:Show()
+    else
+        -- Inactive and not show-always: hide slot entirely
+        bg:Hide()
     end
 end
 
 -- ============ Display Update ============
+-- Neupositioniert alle sichtbaren Slots lückenlos von links nach rechts
+local function RepositionVisibleSlots()
+    if not ProcState.procFrame then return end
+    local db = GetDB()
+    local iconSize = db.procFrameIconSize or 40
+    local padding  = 6
+    local dragPad  = 8
+    local slotW    = iconSize + 4
+
+    local visibleSlots = {}
+    local n = 0
+    if ProcState.lnlBg  and ProcState.lnlBg:IsShown()  then n = n + 1; visibleSlots[n] = ProcState.lnlBg  end
+    if ProcState.ammoBg and ProcState.ammoBg:IsShown() then n = n + 1; visibleSlots[n] = ProcState.ammoBg end
+    if ProcState.kcBg   and ProcState.kcBg:IsShown()   then n = n + 1; visibleSlots[n] = ProcState.kcBg   end
+
+    local frameW = math.max(1, n) * slotW + math.max(0, n - 1) * padding + dragPad * 2
+    ProcState.procFrame:SetWidth(frameW)
+
+    local i
+    for i = 1, n do
+        local xOff = (i - 1) * (slotW + padding)
+        visibleSlots[i]:ClearAllPoints()
+        visibleSlots[i]:SetPoint("LEFT", ProcState.procFrame, "LEFT", dragPad + xOff, 0)
+    end
+
+    -- ammoSpellIconBg folgt ihrem Ammo-Slot automatisch (BOTTOM anchor auf ammoBg)
+end
+
 function HHT_UpdateProcDisplay()
     if not ProcState.procFrame then return end
 
@@ -307,37 +382,18 @@ function HHT_UpdateProcDisplay()
     if lnlEnabled  == nil then lnlEnabled  = true end
     if ammoEnabled == nil then ammoEnabled = true end
 
-    local anyActive = ProcState.lnlActive or ProcState.ammoActive
-
-    -- Hide frame when no procs active and showAlways is off
     local showAlways = db.procFrameShowAlways
-    if showAlways == nil then showAlways = false end
+    if showAlways == nil then showAlways = true end
+    -- showAlways=true  → inaktive Slots gedimmt anzeigen
+    -- showAlways=false → inaktive Slots komplett ausblenden + Slots nach links schieben
+    local showDimmed = showAlways
 
-    if not anyActive and not showAlways then
-        ProcState.procFrame:Hide()
-        return
-    end
+    -- Outer frame immer sichtbar wenn enabled
     ProcState.procFrame:Show()
 
-    -- Pulse animation: smooth ramp 0..1
+    -- Pulse animation
     ProcState.pulsePhase = ProcState.pulsePhase + ProcState.UPDATE_INTERVAL * 3.5
-    local pulseAlpha = (math.sin(ProcState.pulsePhase) + 1) * 0.5  -- 0.0 .. 1.0
-
-    -- Visibility of each slot background
-    if ProcState.lnlBg then
-        if lnlEnabled then
-            ProcState.lnlBg:Show()
-        else
-            ProcState.lnlBg:Hide()
-        end
-    end
-    if ProcState.ammoBg then
-        if ammoEnabled then
-            ProcState.ammoBg:Show()
-        else
-            ProcState.ammoBg:Hide()
-        end
-    end
+    local pulseAlpha = (math.sin(ProcState.pulsePhase) + 1) * 0.5
 
     -- Lock and Load slot
     if lnlEnabled then
@@ -354,19 +410,27 @@ function HHT_UpdateProcDisplay()
                 -- tl == 0: no timer data or permanent buff - keep previous expireTime as-is
             else
                 -- Slot no longer holds LnL (expired between scans)
-                ProcState.lnlActive     = false
-                ProcState.lnlSlot       = 0
-                ProcState.lnlBuffId     = 0
-                ProcState.lnlExpireTime = 0
+                    ProcState.lnlActive       = false
+                ProcState.lnlSlot         = 0
+                ProcState.lnlBuffId       = 0
+                ProcState.lnlExpireTime   = 0
+                ProcState.lnlNPExpireTime = 0
                 liveTex = nil
             end
         end
+        -- Nampower: prefer server-accurate expireTime; fall back to API read
+        local lnlDisplayExpireTime = ProcState.lnlNPExpireTime
+        if lnlDisplayExpireTime <= 0 or lnlDisplayExpireTime <= GetTime() then
+            lnlDisplayExpireTime = ProcState.lnlExpireTime
+        end
         UpdateIconSlot(
             ProcState.lnlBg, ProcState.lnlIcon, ProcState.lnlGlow, ProcState.lnlTimer,
-            ProcState.lnlActive, ProcState.lnlExpireTime,
+            ProcState.lnlActive, lnlDisplayExpireTime,
             liveTex, LNL_FALLBACK_ICON,
-            pulseAlpha
+            pulseAlpha, showDimmed
         )
+    elseif ProcState.lnlBg then
+        ProcState.lnlBg:Hide()
     end
 
     -- Experimental Ammo slot
@@ -392,27 +456,148 @@ function HHT_UpdateProcDisplay()
             ProcState.ammoBg, ProcState.ammoIcon, ProcState.ammoGlow, ProcState.ammoTimer,
             ProcState.ammoActive, ProcState.ammoExpireTime,
             liveTex, fallback,
-            pulseAlpha
+            pulseAlpha, showDimmed
         )
 
-        -- Spell hint label
-        if ProcState.ammoLabel then
-            if ProcState.ammoActive then
-                local hint = ""
+        -- Spell icon overlay above ammo slot (only when active)
+        if ProcState.ammoActive then
+            local spellIcon, bindKey
+            if ProcState.ammoType == "explosive" then
+                spellIcon = ProcState.ammoSpellIconExplosive
+                bindKey   = GetSpellKeybind("Multi-Shot")
+            elseif ProcState.ammoType == "poisonous" then
+                spellIcon = ProcState.ammoSpellIconPoisonous
+                bindKey   = GetSpellKeybind("Serpent Sting")
+            elseif ProcState.ammoType == "enchanted" then
+                spellIcon = ProcState.ammoSpellIconEnchanted
+                bindKey   = GetSpellKeybind("Arcane Shot")
+            end
+
+            if ProcState.ammoSpellIcon and spellIcon then
+                ProcState.ammoSpellIcon:SetTexture(spellIcon)
+
+                -- Check if spell is on cooldown
+                local spellCdSlot = nil
                 if ProcState.ammoType == "explosive" then
-                    hint = "Multi-Shot"
+                    spellCdSlot = ProcState.ammoSpellSlotExplosive
                 elseif ProcState.ammoType == "poisonous" then
-                    hint = "Serpent Sting"
+                    spellCdSlot = ProcState.ammoSpellSlotPoisonous
                 elseif ProcState.ammoType == "enchanted" then
-                    hint = "Arcane Shot"
+                    spellCdSlot = ProcState.ammoSpellSlotEnchanted
                 end
-                ProcState.ammoLabel:SetText(hint)
-                ProcState.ammoLabel:Show()
-            else
-                ProcState.ammoLabel:SetText("")
-                ProcState.ammoLabel:Hide()
+                local spellOnCd = false
+                local spellCdRemaining = 0
+                if spellCdSlot then
+                    local cdOk, cdStart, cdDur = pcall(GetSpellCooldown, spellCdSlot, BOOKTYPE_SPELL)
+                    if cdOk and cdStart and cdDur and cdDur > 0 then
+                        spellCdRemaining = (cdStart + cdDur) - GetTime()
+                        if spellCdRemaining < 0 then spellCdRemaining = 0 end
+                        if spellCdRemaining > 0 then spellOnCd = true end
+                    end
+                end
+
+                if spellOnCd then
+                    ProcState.ammoSpellIcon:SetAlpha(0.25)
+                    if ProcState.ammoSpellCdTimer then
+                        local cdText
+                        if spellCdRemaining >= 10 then
+                            cdText = tostring(math.floor(spellCdRemaining))
+                        else
+                            cdText = string.format("%.1f", spellCdRemaining)
+                        end
+                        ProcState.ammoSpellCdTimer:SetText(cdText)
+                    end
+                else
+                    ProcState.ammoSpellIcon:SetAlpha(1.0)
+                    if ProcState.ammoSpellCdTimer then
+                        ProcState.ammoSpellCdTimer:SetText("")
+                    end
+                end
+
+                if ProcState.ammoKeybindText then
+                    ProcState.ammoKeybindText:SetText(bindKey and ("[" .. bindKey .. "]") or "")
+                end
+                ProcState.ammoSpellIconBg:Show()
+            elseif ProcState.ammoSpellIconBg then
+                ProcState.ammoSpellIconBg:Hide()
+            end
+        else
+            if ProcState.ammoSpellIconBg then
+                ProcState.ammoSpellIconBg:Hide()
             end
         end
+    elseif ProcState.ammoBg then
+        ProcState.ammoBg:Hide()
+        if ProcState.ammoSpellIconBg then ProcState.ammoSpellIconBg:Hide() end
+    end
+
+    -- Kill Command slot
+    -- KC is only usable after the pet damages an enemy (IsUsableSpell checks this condition).
+    -- States: usable (GO + glow) | on cooldown (grey + timer) | not usable (very dim, no text)
+    local kcEnabled = db.procFrameKcEnabled
+    if kcEnabled == nil then kcEnabled = false end
+    if kcEnabled and ProcState.kcBg then
+        ProcState.kcBg:Show()
+        ProcState.kcIcon:SetTexture("Interface\\Icons\\Ability_Hunter_KillCommand")
+
+        -- Check cooldown
+        local cdRemaining = 0
+        local isOnCooldown = false
+        if not ProcState.previewMode and ProcState.kcSpellSlot then
+            local cdOk, cdStart, cdDur = pcall(GetSpellCooldown, ProcState.kcSpellSlot, BOOKTYPE_SPELL)
+            if cdOk and cdStart and cdDur and cdDur > 1.5 then
+                -- Ignore GCD-only cooldowns (<=1.5s) - those aren't real KC cooldowns
+                cdRemaining = (cdStart + cdDur) - GetTime()
+                if cdRemaining < 0 then cdRemaining = 0 end
+                isOnCooldown = cdRemaining > 0
+            end
+        end
+
+        -- Check if KC is usable right now (pet attacked recently).
+        -- IsUsableAction mirrors exactly what the action bar displays.
+        local kcUsable = false
+        if not ProcState.previewMode then
+            if ProcState.kcActionSlot then
+                local ok, usable = pcall(IsUsableAction, ProcState.kcActionSlot)
+                kcUsable = ok and usable or false
+            elseif ProcState.kcSpellSlot then
+                -- Fallback when KC not on action bar
+                local ok, usable = pcall(IsUsableSpell, ProcState.kcSpellSlot, BOOKTYPE_SPELL)
+                kcUsable = ok and usable or false
+            end
+        end
+
+        if isOnCooldown then
+            -- On cooldown: grey icon + remaining time
+            ProcState.kcIcon:SetAlpha(0.25)
+            if ProcState.kcGlow then ProcState.kcGlow:SetAlpha(0) end
+            local cdText
+            if cdRemaining >= 10 then
+                cdText = tostring(math.floor(cdRemaining))
+            else
+                cdText = string.format("%.1f", cdRemaining)
+            end
+            ProcState.kcTimer:SetText(cdText)
+            ProcState.kcTimer:SetTextColor(0.7, 0.7, 0.7, 1)
+        elseif kcUsable then
+            -- Usable and off cooldown: full alpha + glow pulse + GO
+            ProcState.kcIcon:SetAlpha(1.0)
+            if ProcState.kcGlow then ProcState.kcGlow:SetAlpha(pulseAlpha * 0.55) end
+            ProcState.kcTimer:SetText("GO")
+            ProcState.kcTimer:SetTextColor(0.2, 1, 0.2, 1)
+        else
+            -- Not usable (pet hasn't attacked / no pet): very dim, no text
+            ProcState.kcIcon:SetAlpha(0.12)
+            if ProcState.kcGlow then ProcState.kcGlow:SetAlpha(0) end
+            ProcState.kcTimer:SetText("")
+        end
+    elseif ProcState.kcBg then
+        ProcState.kcBg:Hide()
+    end
+
+    -- Slots neu positionieren (lückenlos wenn showAlways=false)
+    if not showDimmed then
+        RepositionVisibleSlots()
     end
 end
 
@@ -439,6 +624,7 @@ local function CreateProcFrame()
     f:SetWidth(frameW)
     f:SetHeight(frameH)
     f:SetFrameStrata("MEDIUM")
+    f:SetClampedToScreen(true)
 
     -- Load saved position
     local point = db.procFramePoint or "CENTER"
@@ -481,6 +667,7 @@ local function CreateProcFrame()
         })
         bg:SetBackdropColor(0, 0, 0, 0.82)
         bg:SetBackdropBorderColor(0.25, 0.25, 0.25, 0.9)
+        bg:Hide()  -- start hidden; HHT_UpdateProcDisplay controls Show/Hide
 
         -- Icon texture
         local icon = bg:CreateTexture(nil, "ARTWORK")
@@ -511,16 +698,50 @@ local function CreateProcFrame()
 
     -- Slot 1: Lock and Load (left)
     ProcState.lnlBg,  ProcState.lnlIcon,  ProcState.lnlGlow,  ProcState.lnlTimer  = MakeIconSlot(0)
-    -- Slot 2: Experimental Ammo (right)
+    -- Slot 2: Experimental Ammo
     ProcState.ammoBg, ProcState.ammoIcon, ProcState.ammoGlow, ProcState.ammoTimer = MakeIconSlot(slotW + padding)
+    -- Slot 3: Kill Command
+    ProcState.kcBg,   ProcState.kcIcon,   ProcState.kcGlow,   ProcState.kcTimer   = MakeIconSlot(2 * (slotW + padding))
 
-    -- Spell hint label: shown to the right of the ammo slot
-    local label = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    label:SetPoint("LEFT", ProcState.ammoBg, "RIGHT", 4, 0)
-    label:SetJustifyH("LEFT")
-    label:SetText("")
-    label:SetTextColor(1, 0.9, 0.5, 1)  -- warm yellow
-    ProcState.ammoLabel = label
+    -- Spell icon overlay above ammo slot (full icon size, shows which spell to press)
+    local ammoSpellIconBg = CreateFrame("Frame", nil, f)
+    ammoSpellIconBg:SetWidth(slotW)
+    ammoSpellIconBg:SetHeight(iconSize + 4)
+    ammoSpellIconBg:SetPoint("BOTTOM", ProcState.ammoBg, "TOP", 0, 2)
+    ammoSpellIconBg:SetBackdrop({
+        bgFile   = "Interface\\BUTTONS\\WHITE8X8",
+        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+        edgeSize = 8,
+        insets   = { left = 2, right = 2, top = 2, bottom = 2 },
+    })
+    ammoSpellIconBg:SetBackdropColor(0, 0, 0, 0.82)
+    ammoSpellIconBg:SetBackdropBorderColor(0.25, 0.25, 0.25, 0.9)
+    ammoSpellIconBg:Hide()
+    ProcState.ammoSpellIconBg = ammoSpellIconBg
+
+    local ammoSpellIcon = ammoSpellIconBg:CreateTexture(nil, "ARTWORK")
+    ammoSpellIcon:SetWidth(iconSize)
+    ammoSpellIcon:SetHeight(iconSize)
+    ammoSpellIcon:SetPoint("CENTER", ammoSpellIconBg, "CENTER", 0, 0)
+    ammoSpellIcon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
+    ProcState.ammoSpellIcon = ammoSpellIcon
+
+    -- Keybind text overlaid at bottom of the spell icon
+    local ammoKeybindText = ammoSpellIconBg:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    ammoKeybindText:SetPoint("BOTTOM", ammoSpellIconBg, "BOTTOM", 0, 2)
+    ammoKeybindText:SetTextColor(1, 1, 0, 1)
+    ammoKeybindText:SetText("")
+    ProcState.ammoKeybindText = ammoKeybindText
+
+    -- Cooldown timer overlaid in center of the spell icon (shown when spell is on CD)
+    local ammoSpellCdTimer = ammoSpellIconBg:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    ammoSpellCdTimer:SetPoint("CENTER", ammoSpellIconBg, "CENTER", 0, 0)
+    ammoSpellCdTimer:SetTextColor(1, 0.9, 0.1, 1)
+    ammoSpellCdTimer:SetText("")
+    ProcState.ammoSpellCdTimer = ammoSpellCdTimer
+
+    -- 3 slots
+    f:SetWidth(3 * slotW + 2 * padding + dragPad * 2)
 end
 
 -- ============ OnUpdate (throttled) ============
@@ -528,7 +749,7 @@ ProcModule:SetScript("OnUpdate", function()
     if not ProcState.procFrame then return end
 
     local db = GetDB()
-    if not db.procFrameEnabled then
+    if db.procFrameEnabled == false then
         if ProcState.procFrame:IsShown() then ProcState.procFrame:Hide() end
         return
     end
@@ -537,17 +758,20 @@ ProcModule:SetScript("OnUpdate", function()
     if now - ProcState.lastUpdate < ProcState.UPDATE_INTERVAL then return end
     ProcState.lastUpdate = now
 
-    -- Deferred rescan: UNIT_BUFF fires before buff list updates in 1.12,
-    -- so we scan again on the next frame to catch procs missed by the event scan
-    if ProcState.pendingRescan then
-        ProcState.pendingRescan = false
-        ScanProcs(true)
+    -- Wrap in pcall so a single runtime error doesn't permanently break the display loop
+    local ok, err = pcall(function()
+        if ProcState.pendingRescan then
+            ProcState.pendingRescan = false
+            ScanProcs(true)
+            HHT_UpdateProcDisplay()
+            return
+        end
+        ScanProcs()
         HHT_UpdateProcDisplay()
-        return
+    end)
+    if not ok and err then
+        DEFAULT_CHAT_FRAME:AddMessage("|cFFFF4444HHT ProcFrame OnUpdate error:|r " .. tostring(err), 1, 0.3, 0.3)
     end
-
-    ScanProcs()  -- throttled internally; keeps state current without relying on events
-    HHT_UpdateProcDisplay()
 end)
 
 -- ============ Event Handler ============
@@ -556,10 +780,14 @@ ProcModule:SetScript("OnEvent", function()
         ProcModule:UnregisterEvent("VARIABLES_LOADED")
         HHT_ProcFrame_Initialize()
 
+    elseif event == "AURA_CAST_ON_SELF" then
+        local spellId = tonumber(arg1) or 0
+        local durationMs = tonumber(arg8) or 0
+        if spellId == LNL_SPELL_ID and durationMs > 0 then
+            ProcState.lnlNPExpireTime = GetTime() + durationMs / 1000
+        end
+
     elseif event == "UNIT_BUFF" or event == "UNIT_DEBUFF" then
-        -- arg1 == "player" means player's auras changed; scan immediately (no throttle)
-        -- UNIT_BUFF fires before buff list updates in 1.12, so also set pendingRescan
-        -- to catch procs on the very next frame
         if arg1 == "player" then
             ScanProcs(true)
             HHT_UpdateProcDisplay()
@@ -567,8 +795,6 @@ ProcModule:SetScript("OnEvent", function()
         end
 
     elseif event == "PLAYER_ENTERING_WORLD" then
-        -- DetectSuperWoW() in the main file runs on this same event.
-        -- If initialization was skipped earlier (DB not ready), retry now.
         if not ProcState.procFrame then
             HHT_ProcFrame_Initialize()
         end
@@ -603,9 +829,41 @@ function HHT_ProcFrame_SetMouseEnabled(enabled)
     end
 end
 
+-- Reposition all enabled slots left-to-right (called after enable/disable or icon size change)
+function HHT_ProcFrame_RebuildLayout()
+    if not ProcState.procFrame then return end
+    local db = GetDB()
+    local iconSize = db.procFrameIconSize or 40
+    local padding  = 6
+    local dragPad  = 8
+    local slotW    = iconSize + 4
+
+    local lnlEnabled  = (db.procFrameLnlEnabled  ~= false)
+    local ammoEnabled = (db.procFrameAmmoEnabled ~= false)
+    local kcEnabled   = (db.procFrameKcEnabled   ~= false)
+
+    -- Build ordered list of enabled slot backgrounds
+    local slots = {}
+    local numSlots = 0
+    if lnlEnabled  and ProcState.lnlBg  then numSlots = numSlots + 1; slots[numSlots] = ProcState.lnlBg  end
+    if ammoEnabled and ProcState.ammoBg then numSlots = numSlots + 1; slots[numSlots] = ProcState.ammoBg end
+    if kcEnabled   and ProcState.kcBg   then numSlots = numSlots + 1; slots[numSlots] = ProcState.kcBg   end
+
+    local numEnabled = math.max(1, numSlots)
+    local frameW = numEnabled * slotW + math.max(0, numEnabled - 1) * padding + dragPad * 2
+    ProcState.procFrame:SetWidth(frameW)
+
+    for i, bg in ipairs(slots) do
+        local xOff = (i - 1) * (slotW + padding)
+        bg:ClearAllPoints()
+        bg:SetPoint("LEFT", ProcState.procFrame, "LEFT", dragPad + xOff, 0)
+    end
+end
+
 -- Called from config tab when settings change
 function HHT_ProcFrame_UpdateSettings()
     if not ProcState.procFrame then return end
+    HHT_ProcFrame_RebuildLayout()
     ScanProcs()
     HHT_UpdateProcDisplay()
 end
@@ -617,49 +875,68 @@ function HHT_ProcFrame_ShowPreview()
     local db = GetDB()
     if not db.procFrameEnabled then return end
 
-    -- Force dummy active state so frame is visible regardless of real buffs
-    ProcState.lnlActive  = true
-    ProcState.lnlSlot    = 0  -- slot 0 → GetBuffTimeLeft returns 0 → shows "!" (no SuperWoW needed for preview)
-    ProcState.ammoActive = true
-    ProcState.ammoSlot   = 0
-    ProcState.ammoType   = "explosive"
+    ProcState.previewMode = true
 
-    -- Force icons to fallback textures for preview (slot 0 won't return real texture)
-    if ProcState.lnlIcon then
-        ProcState.lnlIcon:SetTexture("Interface\\Icons\\ability_hunter_lockandload")
-        ProcState.lnlIcon:SetAlpha(1.0)
-    end
-    if ProcState.lnlTimer then
-        ProcState.lnlTimer:SetText("8.0")
-        ProcState.lnlTimer:SetTextColor(1, 1, 1, 1)
-    end
-    if ProcState.lnlGlow then ProcState.lnlGlow:SetAlpha(0.35) end
+    local lnlEnabled  = (db.procFrameLnlEnabled  ~= false)
+    local ammoEnabled = (db.procFrameAmmoEnabled ~= false)
+    local kcEnabled   = (db.procFrameKcEnabled   ~= false)
 
-    if ProcState.ammoIcon then
-        ProcState.ammoIcon:SetTexture("Interface\\Icons\\Spell_Fire_SelfDestruct")
-        ProcState.ammoIcon:SetAlpha(1.0)
+    -- LnL slot preview
+    if lnlEnabled and ProcState.lnlBg then
+        ProcState.lnlActive = true
+        if ProcState.lnlIcon  then ProcState.lnlIcon:SetTexture("Interface\\Icons\\ability_hunter_lockandload"); ProcState.lnlIcon:SetAlpha(1.0) end
+        if ProcState.lnlTimer then ProcState.lnlTimer:SetText("8.0"); ProcState.lnlTimer:SetTextColor(1, 1, 1, 1) end
+        if ProcState.lnlGlow  then ProcState.lnlGlow:SetAlpha(0.35) end
+        ProcState.lnlBg:Show()
     end
-    if ProcState.ammoTimer then
-        ProcState.ammoTimer:SetText("!")
-        ProcState.ammoTimer:SetTextColor(1, 1, 0, 1)
-    end
-    if ProcState.ammoGlow then ProcState.ammoGlow:SetAlpha(0.35) end
 
-    if ProcState.lnlBg  then ProcState.lnlBg:Show()  end
-    if ProcState.ammoBg then ProcState.ammoBg:Show() end
+    -- Ammo slot preview
+    if ammoEnabled and ProcState.ammoBg then
+        ProcState.ammoActive = true
+        ProcState.ammoType   = "explosive"
+        if ProcState.ammoIcon  then ProcState.ammoIcon:SetTexture("Interface\\Icons\\Spell_Fire_SelfDestruct"); ProcState.ammoIcon:SetAlpha(1.0) end
+        if ProcState.ammoTimer then ProcState.ammoTimer:SetText("!"); ProcState.ammoTimer:SetTextColor(1, 1, 0, 1) end
+        if ProcState.ammoGlow  then ProcState.ammoGlow:SetAlpha(0.35) end
+        ProcState.ammoBg:Show()
+        -- Spell icon overlay
+        if ProcState.ammoSpellIconBg then ProcState.ammoSpellIconBg:Show() end
+        if ProcState.ammoSpellIcon and ProcState.ammoSpellIconExplosive then
+            ProcState.ammoSpellIcon:SetTexture(ProcState.ammoSpellIconExplosive)
+            ProcState.ammoSpellIcon:SetAlpha(1.0)
+        end
+        if ProcState.ammoKeybindText then
+            local key = GetSpellKeybind("Multi-Shot")
+            ProcState.ammoKeybindText:SetText(key and ("[" .. key .. "]") or "")
+        end
+    end
+
+    -- Kill Command slot preview
+    if kcEnabled and ProcState.kcBg then
+        ProcState.kcReady       = true
+        ProcState.kcCooldownEnd = 0
+        if ProcState.kcIcon  then ProcState.kcIcon:SetTexture("Interface\\Icons\\Ability_Hunter_KillCommand"); ProcState.kcIcon:SetAlpha(1.0) end
+        if ProcState.kcTimer then ProcState.kcTimer:SetText("GO"); ProcState.kcTimer:SetTextColor(0.2, 1, 0.2, 1) end
+        if ProcState.kcGlow  then ProcState.kcGlow:SetAlpha(0.35) end
+        ProcState.kcBg:Show()
+    end
+
     ProcState.procFrame:Show()
 end
 
 -- Hide preview / restore normal state (called from HideConfigPreview in main addon)
 function HHT_ProcFrame_HidePreview()
     if not ProcState.procFrame then return end
-    -- Reset dummy state and re-scan real buffs
-    ProcState.lnlActive  = false
-    ProcState.lnlSlot    = 0
-    ProcState.ammoActive = false
-    ProcState.ammoSlot   = 0
-    ProcState.ammoType   = nil
-    ScanProcs()
+    -- Disable preview mode first so ScanProcs runs again
+    ProcState.previewMode   = false
+    -- Reset dummy state
+    ProcState.lnlActive     = false
+    ProcState.lnlSlot       = 0
+    ProcState.ammoActive    = false
+    ProcState.ammoSlot      = 0
+    ProcState.ammoType      = nil
+    ProcState.kcReady       = false
+    ProcState.kcCooldownEnd = 0
+    ScanProcs(true)
     HHT_UpdateProcDisplay()
 end
 
@@ -674,7 +951,6 @@ function HHT_ProcFrame_ApplyIconSize(newSize)
     local slotW   = newSize + 4
     local slotH   = newSize + 4 + timerH
 
-    ProcState.procFrame:SetWidth(2 * slotW + padding + dragPad * 2)
     ProcState.procFrame:SetHeight(slotH + dragPad * 2)
 
     -- Resize each slot background and its children
@@ -690,12 +966,20 @@ function HHT_ProcFrame_ApplyIconSize(newSize)
 
     ResizeSlot(ProcState.lnlBg,  ProcState.lnlIcon,  ProcState.lnlGlow)
     ResizeSlot(ProcState.ammoBg, ProcState.ammoIcon, ProcState.ammoGlow)
+    ResizeSlot(ProcState.kcBg,   ProcState.kcIcon,   ProcState.kcGlow)
 
-    -- Reposition ammo slot background
-    if ProcState.ammoBg then
-        ProcState.ammoBg:ClearAllPoints()
-        ProcState.ammoBg:SetPoint("LEFT", ProcState.procFrame, "LEFT", dragPad + slotW + padding, 0)
+    -- Resize ammo spell icon overlay (same size as main icon)
+    if ProcState.ammoSpellIconBg then
+        ProcState.ammoSpellIconBg:SetWidth(slotW)
+        ProcState.ammoSpellIconBg:SetHeight(newSize + 4)
     end
+    if ProcState.ammoSpellIcon then
+        ProcState.ammoSpellIcon:SetWidth(newSize)
+        ProcState.ammoSpellIcon:SetHeight(newSize)
+    end
+
+    -- Reposition slots based on which are enabled
+    HHT_ProcFrame_RebuildLayout()
 end
 
 -- ============ /hht proc scan ============
@@ -756,6 +1040,59 @@ function HHT_ProcFrame_Scan()
 end
 
 -- ============ Initialize ============
+-- Scans the spellbook to cache the real icon texture for each ammo-triggered spell.
+-- Defined here (after ProcState) so ProcState is in scope as an upvalue.
+-- ============ Initialize ============
+local function CacheSpellBookInfo()
+    local ammoToFind = {
+        ["Multi-Shot"]    = "ammoSpellIconExplosive",
+        ["Serpent Sting"] = "ammoSpellIconPoisonous",
+        ["Arcane Shot"]   = "ammoSpellIconEnchanted",
+    }
+    local ammoSlotMap = {
+        ["Multi-Shot"]    = "ammoSpellSlotExplosive",
+        ["Serpent Sting"] = "ammoSpellSlotPoisonous",
+        ["Arcane Shot"]   = "ammoSpellSlotEnchanted",
+    }
+    local ammoRemaining = 3
+    for i = 1, 300 do
+        local name = GetSpellName(i, BOOKTYPE_SPELL)
+        if not name then break end
+        -- Cache Kill Command spell slot
+        if name == KC_SPELL_NAME and not ProcState.kcSpellSlot then
+            ProcState.kcSpellSlot = i
+        end
+        -- Cache ammo spell icons + slot numbers
+        local key = ammoToFind[name]
+        if key and not ProcState[key] then
+            ProcState[key] = GetSpellTexture(i, BOOKTYPE_SPELL)
+            ProcState[ammoSlotMap[name]] = i  -- cache slot# for GetSpellCooldown
+            ammoRemaining = ammoRemaining - 1
+        end
+        -- Stop early when everything found
+        if ammoRemaining <= 0 and ProcState.kcSpellSlot then break end
+    end
+
+    -- Find KC on the action bar by matching its icon texture.
+    -- IsUsableAction(slot) is what the action bar itself uses - correctly reflects proc state.
+    if ProcState.kcSpellSlot then
+        local kcTex = GetSpellTexture(ProcState.kcSpellSlot, BOOKTYPE_SPELL)
+        if kcTex then
+            kcTex = string.lower(kcTex)
+            local i
+            for i = 1, 120 do
+                if HasAction(i) then
+                    local aTex = GetActionTexture(i)
+                    if aTex and string.lower(aTex) == kcTex then
+                        ProcState.kcActionSlot = i
+                        break
+                    end
+                end
+            end
+        end
+    end
+end
+
 function HHT_ProcFrame_Initialize()
     -- Wait until DB is loaded by the WoW client
     if not HamingwaysHunterToolsDB then
@@ -766,22 +1103,25 @@ function HHT_ProcFrame_Initialize()
     -- Don't double-create if already initialized
     if ProcState.procFrame then return end
 
-    -- SuperWoW is preferred for timers but not strictly required;
-    -- GetBuffTimeLeft degrades gracefully to 0 when APIs are absent.
-    -- (HAS_SUPERWOW may not be set yet at VARIABLES_LOADED — it is set
-    --  during PLAYER_ENTERING_WORLD by DetectSuperWoW() in the main file.)
-
     -- Create the frame
-    CreateProcFrame()
+    local ok, err = pcall(CreateProcFrame)
+    if not ok then
+        DEFAULT_CHAT_FRAME:AddMessage("|cFFFF4444HHT ProcFrame FEHLER:|r " .. tostring(err), 1, 0.2, 0.2)
+        return
+    end
+
+    -- Cache spell icons + KC slot from spellbook (non-fatal if unavailable)
+    pcall(CacheSpellBookInfo)
 
     -- Register events
     ProcModule:RegisterEvent("UNIT_BUFF")
-    ProcModule:RegisterEvent("UNIT_DEBUFF")   -- Experimental Ammo appears as player debuff
+    ProcModule:RegisterEvent("UNIT_DEBUFF")
     ProcModule:RegisterEvent("PLAYER_ENTERING_WORLD")
+    if SetCVar then pcall(SetCVar, "NP_EnableAuraCastEvents", "1") end
+    ProcModule:RegisterEvent("AURA_CAST_ON_SELF")
 
     DEFAULT_CHAT_FRAME:AddMessage(
-        "|cFFABD473HHT:|r Proc Frame loaded. " ..
-        "Use |cFFFFFF00/hht proc scan|r to discover buff textures.",
+        "|cFFABD473HHT:|r Proc Frame loaded. Use |cFFFFFF00/hht proc scan|r to discover buff textures.",
         0.67, 0.83, 0.45)
 end
 

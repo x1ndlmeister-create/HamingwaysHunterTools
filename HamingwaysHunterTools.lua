@@ -3,7 +3,7 @@
 -- Autoshot timer matching Quiver's design: red reload, yellow windup
 
 -- Version: x.y.z (x=release 0-9, y=feature 0-999, z=build 0-9999)
-local VERSION = "1.1.3"  -- Fix: Castbar duration, haste buff timer, repo structure
+local VERSION = "1.1.4"  -- KC tracking, ammo spell CD, aspect icons from spellbook
 
 local AH = CreateFrame("Frame", "HamingwaysHunterToolsCore")
 
@@ -317,6 +317,17 @@ for texture, data in pairs(hasteBuffsByTexture) do
     hasteBuffNames[data.name] = true
 end
 
+-- Nampower: name-based lookup for AURA_CAST_ON_SELF event (spell name -> buff data)
+-- Spell names from GetSpellNameAndRankForId() typically match the buff names in hasteBuffsByTexture
+local hasteBuffsByName = {}
+for texture, data in pairs(hasteBuffsByTexture) do
+    hasteBuffsByName[string.lower(data.name)] = data
+end
+
+-- Server-accurate expireTimes from Nampower AURA_CAST_ON_SELF (durationMs from packet).
+-- Replaces GetPlayerBuffTimeLeft fallback when Nampower is available.
+local hasteNameToExpireTime = {}
+
 -- buffDurations removed - duration is now stored in hasteBuffsByTexture table
 
 -- Hunter Instant Shots (should NOT reset auto shot timer)
@@ -493,11 +504,14 @@ local function GetConfig()
     if HamingwaysHunterToolsDB.procFrameAmmoEnabled == nil then
         HamingwaysHunterToolsDB.procFrameAmmoEnabled = true
     end
+    if HamingwaysHunterToolsDB.procFrameKcEnabled == nil then
+        HamingwaysHunterToolsDB.procFrameKcEnabled = false
+    end
     if HamingwaysHunterToolsDB.procFrameIconSize == nil then
         HamingwaysHunterToolsDB.procFrameIconSize = 40
     end
     if HamingwaysHunterToolsDB.procFrameShowAlways == nil then
-        HamingwaysHunterToolsDB.procFrameShowAlways = false
+        HamingwaysHunterToolsDB.procFrameShowAlways = true
     end
     if HamingwaysHunterToolsDB.procFramePoint == nil then
         HamingwaysHunterToolsDB.procFramePoint = "CENTER"
@@ -570,6 +584,7 @@ local function GetConfig()
         procFrameEnabled     = HamingwaysHunterToolsDB.procFrameEnabled,
         procFrameLnlEnabled  = HamingwaysHunterToolsDB.procFrameLnlEnabled,
         procFrameAmmoEnabled = HamingwaysHunterToolsDB.procFrameAmmoEnabled,
+        procFrameKcEnabled   = HamingwaysHunterToolsDB.procFrameKcEnabled,
         procFrameIconSize    = HamingwaysHunterToolsDB.procFrameIconSize,
         procFrameShowAlways  = HamingwaysHunterToolsDB.procFrameShowAlways,
         procFramePoint       = HamingwaysHunterToolsDB.procFramePoint,
@@ -1013,6 +1028,11 @@ local activeBuffs = {}
 local foundBuffs = {}
 local activeBuffCount = 0
 
+-- Set by PLAYER_AURAS_CHANGED. Causes next UpdateHasteBuffs to re-read
+-- GetPlayerBuffTimeLeft from fresh stable slots (not from the event itself,
+-- where buff slot table may still be in transition).
+local hasteBuffsNeedRefresh = false
+
 local function UpdateHasteBuffs()
     if not hasteFrame then return end
     if HHT_Core.previewMode then return end  -- Don't update buffs in preview mode
@@ -1020,6 +1040,19 @@ local function UpdateHasteBuffs()
     -- Note: Always scan for haste buffs (needed for weapon speed calculation)
     -- Visibility of buffbar is controlled separately below based on showBuffBar setting
     
+    -- Preserve expireTimes across scans so the countdown doesn't reset every 0.1s.
+    -- When hasteBuffsNeedRefresh=true (set by PLAYER_AURAS_CHANGED after a buff
+    -- change), we skip saved times and re-read fresh from the now-stable slots.
+    local savedExpireTimes = {}
+    if not hasteBuffsNeedRefresh then
+        for i = 1, activeBuffCount do
+            if activeBuffs[i] and activeBuffs[i].name and activeBuffs[i].expireTime then
+                savedExpireTimes[activeBuffs[i].name] = activeBuffs[i].expireTime
+            end
+        end
+    end
+    hasteBuffsNeedRefresh = false
+
     -- PERFORMANCE: Reuse tables instead of creating new ones (pfUI pattern)
     for k in pairs(foundBuffs) do foundBuffs[k] = nil end
     
@@ -1035,8 +1068,6 @@ local function UpdateHasteBuffs()
         if buffId >= 0 then
             local buffTexture = GetPlayerBuffTexture(buffId)
             local buffCount = GetPlayerBuffApplications(buffId)
-            local buffIndex = PLAYER_BUFF_START_ID + i  -- Store INDEX for GetPlayerBuffTimeLeft
-            local actualRemaining = GetPlayerBuffTimeLeft(buffIndex)
             
             -- TEXTURE-BASED DETECTION - 10000x faster than tooltip scan!
             if buffTexture and hasteBuffsByTexture[buffTexture] then
@@ -1044,21 +1075,35 @@ local function UpdateHasteBuffs()
                 local buffName = buffData.name
                 
                 -- Skip if we already found this buff (prevent duplicates)
-                -- Also skip if buff has expired (remaining time <= 0)
-                if not foundBuffs[buffName] and actualRemaining and actualRemaining > 0 then
-                    foundBuffs[buffName] = true
-                    
-                    -- PERFORMANCE: Reuse existing table entry instead of creating new one (Quiver pattern)
-                    activeBuffCount = activeBuffCount + 1
-                    if not activeBuffs[activeBuffCount] then
-                        activeBuffs[activeBuffCount] = {}
+                if not foundBuffs[buffName] then
+                    -- Nampower: prefer server-accurate expireTime (no slot drift / transition reads)
+                    local expireTime = hasteNameToExpireTime[buffName]
+                    if not expireTime or expireTime <= currentTime then
+                        -- Nampower not available / expired: fall back to saved time or API read
+                        expireTime = savedExpireTimes[buffName]
+                        if not expireTime or expireTime <= currentTime then
+                            -- New buff or force-refresh: slot index i is stable (just confirmed here)
+                            local actualRemaining = GetPlayerBuffTimeLeft(PLAYER_BUFF_START_ID + i)
+                            if actualRemaining and actualRemaining > 0 then
+                                expireTime = currentTime + actualRemaining
+                            end
+                        end
                     end
-                    local buff = activeBuffs[activeBuffCount]
-                    buff.name = buffName
-                    buff.texture = buffTexture
-                    buff.buffIndex = buffIndex
-                    buff.expireTime = currentTime + actualRemaining  -- Use expiry time, not repeated GetPlayerBuffTimeLeft
-                    buff.count = buffCount or 0
+
+                    if expireTime and expireTime > currentTime then
+                        foundBuffs[buffName] = true
+                        
+                        -- PERFORMANCE: Reuse existing table entry instead of creating new one (Quiver pattern)
+                        activeBuffCount = activeBuffCount + 1
+                        if not activeBuffs[activeBuffCount] then
+                            activeBuffs[activeBuffCount] = {}
+                        end
+                        local buff = activeBuffs[activeBuffCount]
+                        buff.name = buffName
+                        buff.texture = buffTexture
+                        buff.expireTime = expireTime
+                        buff.count = buffCount or 0
+                    end
                 end
             end
         end
@@ -1070,6 +1115,7 @@ local function UpdateHasteBuffs()
             activeBuffs[i].buffIndex = nil
             activeBuffs[i].name = nil
             activeBuffs[i].texture = nil
+            activeBuffs[i].expireTime = nil
         end
     end
     
@@ -1144,9 +1190,8 @@ local function UpdateBuffCountdowns()
     if not hasteFrame or not hasteFrame:IsShown() then return end
     
     for i = 1, activeBuffCount do
-        if activeBuffs[i] and activeBuffs[i].buffIndex and hasteIcons[i] and hasteIcons[i]:IsShown() then
-            -- Query API for current remaining time (needed for countdown)
-            local remaining = GetPlayerBuffTimeLeft(activeBuffs[i].buffIndex)
+        if activeBuffs[i] and activeBuffs[i].expireTime and hasteIcons[i] and hasteIcons[i]:IsShown() then
+            local remaining = activeBuffs[i].expireTime - GetTime()
             
             if remaining > 0 then
                 local seconds = math.floor(remaining)
@@ -2398,7 +2443,7 @@ local function CreateConfigFrame()
         if not HamingwaysHunterToolsDB.showBuffBar and hasteFrame then
             hasteFrame:SetAlpha(0)
         else
-            UpdateHasteBuffs()
+            hasteBuffsNeedRefresh = true
         end
     end)
     
@@ -2710,7 +2755,7 @@ local function CreateConfigFrame()
     aspectDropdownText:SetText("Aspect of the Hawk")
     
     UIDropDownMenu_Initialize(aspectDropdown, function()
-        local aspects = {"Aspect of the Hawk", "Aspect of the Monkey", "Aspect of the Cheetah", "Aspect of the Pack", "Aspect of the Wild", "Aspect of the Beast"}
+        local aspects = {"Aspect of the Hawk", "Aspect of the Monkey", "Aspect of the Cheetah", "Aspect of the Pack", "Aspect of the Wild", "Aspect of the Beast", "Aspect of the Viper", "Aspect of the Wolf"}
         for _, aspect in ipairs(aspects) do
             local info = {}
             info.text = aspect
@@ -3091,6 +3136,7 @@ local function CreateConfigFrame()
     lnlCheck:SetScript("OnClick", function()
         HamingwaysHunterToolsDB.procFrameLnlEnabled = this:GetChecked() and true or false
         if HHT_ProcFrame_UpdateSettings then HHT_ProcFrame_UpdateSettings() end
+        if HHT_ProcFrame_ShowPreview    then HHT_ProcFrame_ShowPreview()    end
     end)
 
     -- Experimental Ammo Section
@@ -3102,11 +3148,24 @@ local function CreateConfigFrame()
     ammoCheck:SetScript("OnClick", function()
         HamingwaysHunterToolsDB.procFrameAmmoEnabled = this:GetChecked() and true or false
         if HHT_ProcFrame_UpdateSettings then HHT_ProcFrame_UpdateSettings() end
+        if HHT_ProcFrame_ShowPreview    then HHT_ProcFrame_ShowPreview()    end
+    end)
+
+    -- Kill Command Section
+    local kcLabel = tab11:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    kcLabel:SetPoint("TOPLEFT", 20, -211)
+    kcLabel:SetText("|cFF00FF44 Kill Command:|r")
+
+    local kcCheck = CreateCheckbox("HamingwaysHunterToolsProcKcCheck", tab11, "Show Kill Command slot", -231)
+    kcCheck:SetScript("OnClick", function()
+        HamingwaysHunterToolsDB.procFrameKcEnabled = this:GetChecked() and true or false
+        if HHT_ProcFrame_UpdateSettings then HHT_ProcFrame_UpdateSettings() end
+        if HHT_ProcFrame_ShowPreview    then HHT_ProcFrame_ShowPreview()    end
     end)
 
     -- Icon Size Slider
     local procIconSizeSlider = CreateFrame("Slider", "HamingwaysHunterToolsProcIconSizeSlider", tab11, "OptionsSliderTemplate")
-    procIconSizeSlider:SetPoint("TOPLEFT", 10, -225)
+    procIconSizeSlider:SetPoint("TOPLEFT", 10, -278)
     procIconSizeSlider:SetMinMaxValues(24, 64)
     procIconSizeSlider:SetValueStep(4)
     procIconSizeSlider:SetWidth(250)
@@ -3122,11 +3181,11 @@ local function CreateConfigFrame()
 
     -- All-in-One Macro Info Box
     local ammoMacroTitle = tab11:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    ammoMacroTitle:SetPoint("TOPLEFT", 20, -385)
+    ammoMacroTitle:SetPoint("TOPLEFT", 20, -438)
     ammoMacroTitle:SetText("|cFFFFD100All-in-One Ammo Macro|r")
 
     local ammoMacroInfo = tab11:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    ammoMacroInfo:SetPoint("TOPLEFT", 20, -405)
+    ammoMacroInfo:SetPoint("TOPLEFT", 20, -458)
     ammoMacroInfo:SetWidth(270)
     ammoMacroInfo:SetJustifyH("LEFT")
     ammoMacroInfo:SetText(
@@ -3138,7 +3197,7 @@ local function CreateConfigFrame()
     ammoMacroInfo:SetTextColor(0.8, 0.8, 0.8, 1)
 
     local ammoMacroEditBox = CreateFrame("EditBox", nil, tab11)
-    ammoMacroEditBox:SetPoint("TOP", 0, -468)
+    ammoMacroEditBox:SetPoint("TOP", 0, -521)
     ammoMacroEditBox:SetWidth(270)
     ammoMacroEditBox:SetHeight(22)
     ammoMacroEditBox:SetFont("Fonts\\FRIZQT__.TTF", 11)
@@ -3165,6 +3224,7 @@ local function CreateConfigFrame()
     configFrame.procShowAlwaysCheck  = procShowAlwaysCheck
     configFrame.lnlCheck             = lnlCheck
     configFrame.ammoCheck            = ammoCheck
+    configFrame.kcCheck              = kcCheck
     configFrame.procIconSizeSlider   = procIconSizeSlider
 
     -- Show first tab by default
@@ -3261,6 +3321,9 @@ local function CreateConfigFrame()
         if this.ammoCheck then
             this.ammoCheck:SetChecked(cfg.procFrameAmmoEnabled)
         end
+        if this.kcCheck then
+            this.kcCheck:SetChecked(cfg.procFrameKcEnabled)
+        end
         if this.procIconSizeSlider then
             this.procIconSizeSlider:SetValue(cfg.procFrameIconSize or 40)
             getglobal(this.procIconSizeSlider:GetName().."Text"):SetText("Icon Size: " .. (cfg.procFrameIconSize or 40))
@@ -3312,7 +3375,7 @@ local function HideConfigPreview()
     
     -- Update buff icons to show only real buffs (not preview buffs)
     if hasteFrame then
-        UpdateHasteBuffs()
+        hasteBuffsNeedRefresh = true
     end
     
     -- Update frame visibility to respect combat settings
@@ -3412,7 +3475,7 @@ local function CreateHasteFrame(mainFrame)
     -- PLAYER_AURAS_CHANGED fires 15-30x/sec (every buff tick) - replaced with 2x/sec polling
     -- Note: Always runs to detect haste buffs for weapon speed calculation, even if buffbar is hidden
     hasteFrame:SetScript("OnUpdate", function()
-        if (this.tick or 0) > GetTime() then return else this.tick = GetTime() + 0.5 end
+        if (this.tick or 0) > GetTime() then return else this.tick = GetTime() + 0.1 end
         
         UpdateHasteBuffs()
         UpdateBuffCountdowns()
@@ -3694,6 +3757,12 @@ local function HandlePlayerEnteringWorld()
     
     -- Detect SuperWoW right before showing loaded message
     
+    -- Nampower: enable AURA_CAST_ON_SELF events for server-accurate buff durations
+    if SetCVar then
+        pcall(SetCVar, "NP_EnableAuraCastEvents", "1")
+    end
+    AH:RegisterEvent("AURA_CAST_ON_SELF")
+
     if not loadedMessageShown then
         DEFAULT_CHAT_FRAME:AddMessage("|cFFABD473Hamingway's |r|cFFFFFF00HunterTools |r(" .. VERSION .. ") loaded")
         loadedMessageShown = true
@@ -3704,14 +3773,33 @@ local function HandleInventoryChanged()
     UpdateAmmoDisplay()
 end
 
+-- Nampower: AURA_CAST_ON_SELF provides the server-packet durationMs before slots stabilize.
+-- arg1=spellId, arg2=casterGuid, arg3=targetGuid, arg8=durationMs
+local function HandleNPAuraCastOnSelf()
+    local spellId = tonumber(arg1) or 0
+    local durationMs = tonumber(arg8) or 0
+    if spellId <= 0 or durationMs <= 0 then return end
+
+    local spellName = GetSpellNameAndRankForId and GetSpellNameAndRankForId(spellId)
+    if not spellName then return end
+
+    local buffData = hasteBuffsByName[string.lower(spellName)]
+    if not buffData then return end
+
+    hasteNameToExpireTime[buffData.name] = GetTime() + durationMs / 1000
+end
+
 local function HandleAurasChanged()
     
-    -- PERFORMANCE: Haste buff updates moved to hasteFrame OnUpdate (0.5s throttle)
-    -- No longer called from PLAYER_AURAS_CHANGED event (15-30x/sec → 2x/sec)
-    
+    -- Signal that buff slots changed. The next OnUpdate tick (≤0.1s) will
+    -- re-read GetPlayerBuffTimeLeft from stable slots — NOT here, because
+    -- during PLAYER_AURAS_CHANGED the slot table may still be in transition
+    -- (causes reading a neighbouring buff's time, e.g. the ammo buff time).
+    local now = GetTime()
+    hasteBuffsNeedRefresh = true
+
     -- PERFORMANCE: Throttle pet feeder and warning updates (0.5s)
     -- PLAYER_AURAS_CHANGED can fire 100+ times/sec in 40-man raids
-    local now = GetTime()
     lastAuraUpdateCheck = lastAuraUpdateCheck or 0
     if now - lastAuraUpdateCheck < 0.5 then return end
     lastAuraUpdateCheck = now
@@ -3933,6 +4021,8 @@ AH:SetScript("OnEvent", function()
         HandleAutoShotStop()
     elseif event == "PLAYER_LOGOUT" then
         HandleLogout()
+    elseif event == "AURA_CAST_ON_SELF" then
+        HandleNPAuraCastOnSelf()
     elseif event == "PLAYER_AURAS_CHANGED" then
         HandleAurasChanged()
     elseif event == "UNIT_INVENTORY_CHANGED" and arg1 == "player" then

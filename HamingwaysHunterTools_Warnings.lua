@@ -12,10 +12,30 @@ HHT_AspectIcon = nil
 local availableAspects = {}
 local DEFAULT_WARNING_ICON_SIZE = 40
 
--- Get correct texture path for each aspect
+-- Cache: aspect name -> texture path (filled from spellbook at init)
+local aspectTextureCache = {}
+
+-- Populate cache from spellbook - works for ANY aspect, including custom ones
+local function BuildAspectTextureCache()
+    local i = 1
+    while true do
+        local spellName = GetSpellName(i, BOOKTYPE_SPELL)
+        if not spellName then break end
+        if string.find(spellName, "Aspect of") then
+            aspectTextureCache[spellName] = GetSpellTexture(i, BOOKTYPE_SPELL)
+        end
+        i = i + 1
+    end
+end
+
+-- Returns the texture for a given aspect name.
+-- Uses spellbook cache first; falls back to known icon paths if not found.
 local function GetAspectTexture(aspectName)
     if not aspectName then return "Interface/Icons/Ability_Hunter_AspectOfTheHawk" end
-    
+    if aspectTextureCache[aspectName] then
+        return aspectTextureCache[aspectName]
+    end
+    -- Static fallbacks (used before cache is built or for unknown aspects)
     if string.find(aspectName, "Hawk") then
         return "Interface/Icons/Spell_Nature_RavenForm"
     elseif string.find(aspectName, "Monkey") then
@@ -26,23 +46,23 @@ local function GetAspectTexture(aspectName)
         return "Interface/Icons/Ability_Mount_WhiteTiger"
     elseif string.find(aspectName, "Wild") then
         return "Interface/Icons/Spell_Nature_ProtectionformNature"
+    elseif string.find(aspectName, "Viper") then
+        return "Interface/Icons/Ability_Hunter_AspectOfTheViper"
     elseif string.find(aspectName, "Beast") then
         return "Interface/Icons/Ability_Mount_Pinktiger"
     end
-    
-    return "Interface/Icons/Ability_Hunter_AspectOfTheHawk"  -- fallback
+    return "Interface/Icons/Ability_Hunter_AspectOfTheHawk"
 end
 
 -- ============ Helper Functions ============
 local function ScanAvailableAspects()
     availableAspects = {}
+    BuildAspectTextureCache()  -- rebuild cache at same time
     local i = 1
     while true do
-        local spellName, spellRank = GetSpellName(i, BOOKTYPE_SPELL)
+        local spellName = GetSpellName(i, BOOKTYPE_SPELL)
         if not spellName then break end
-        if spellName == "Aspect of the Hawk" or spellName == "Aspect of the Monkey" or 
-           spellName == "Aspect of the Cheetah" or spellName == "Aspect of the Pack" or 
-           spellName == "Aspect of the Wild" or spellName == "Aspect of the Beast" then
+        if string.find(spellName, "Aspect of") then
             table.insert(availableAspects, spellName)
         end
         i = i + 1
@@ -78,6 +98,10 @@ local function GetCurrentAspect()
                 return "Aspect of the Pack"
             elseif string.find(lowerTexture, "wild") then 
                 return "Aspect of the Wild"
+            elseif string.find(lowerTexture, "viper") then 
+                return "Aspect of the Viper"
+            elseif string.find(lowerTexture, "wolf") then 
+                return "Aspect of the Wolf"
             elseif string.find(lowerTexture, "beast") then 
                 return "Aspect of the Beast"
             end

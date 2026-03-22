@@ -1,5 +1,28 @@
 # Hamingway's HunterTools - Changelog
 
+## Version 1.1.4 (Mar 22, 2026)
+
+### ✨ New Features
+- **Kill Command Tracking** - New optional proc frame slot for Kill Command. Shows GO (full alpha + glow pulse) when the spell is usable after your pet attacks, grey + cooldown timer when on cooldown, and very dim when unavailable. Uses `IsUsableAction` to mirror the action bar exactly.
+- **Spell Cooldown on Ammo Icons** - The spell icon overlay above the ammo proc slot now turns grey and shows the remaining cooldown when the corresponding spell (Multi-Shot / Serpent Sting / Arcane Shot) is on cooldown.
+- **Aspect of the Viper & Wolf** - Added Viper and Wolf to the main aspect dropdown and warning system.
+- **Auto Aspect Icon** - Aspect icons in the warning frame are now loaded directly from your spellbook via `GetSpellTexture`, so the correct icon is always shown for every aspect including custom/modded ones.
+- **Generic Aspect Scanning** - `ScanAvailableAspects` now finds all `"Aspect of"` spells automatically — no hardcoded list needed. New aspects on Turtle WoW are discovered without any code changes.
+
+### 🔧 Bug Fixes
+- **Kill Command "GO" false positive** - Fixed KC showing GO when the action bar showed it as greyed out. Root cause: `IsUsableSpell` does not reflect the KC proc condition correctly in WoW 1.12; switched to `IsUsableAction` on the cached action bar slot.
+- **KC Spell Slot not cached** - `CacheSpellBookInfo` was not caching the Kill Command spellbook slot index, causing all `GetSpellCooldown` calls for KC to silently fail.
+- **GCD false cooldown** - KC no longer flashes grey during the global cooldown (durations ≤1.5s are ignored).
+- **Wolf aspect icon broken** - Removed hardcoded icon path for Wolf; texture is now read from spellbook.
+
+### 📝 Technical Details
+- `ProcState.kcActionSlot` — action bar slot found by texture match at init, used for `IsUsableAction`
+- `ProcState.kcSpellSlot` — spellbook slot cached by `CacheSpellBookInfo`, used for `GetSpellCooldown`
+- `aspectTextureCache` — table populated from spellbook at init, maps aspect name → texture path
+- KC proc frame slot is **disabled by default** (`procFrameKcEnabled = false`)
+
+---
+
 ## Version 1.0.7 (Feb 4, 2026)
 
 ### ✨ New Features
