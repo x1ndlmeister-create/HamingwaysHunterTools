@@ -2,7 +2,7 @@
 -- Proc Frame Module
 -- Displays active hunter procs relevant to rotation (Turtle WoW 1.18.1+)
 -- Tracks: Lock and Load, Experimental Ammunition variants
--- Requires: SuperWoW (for GetPlayerBuffTimeLeft accurate timer)
+-- Requires: Nampower (for BUFF_ADDED_SELF/BUFF_REMOVED_SELF/AURA_CAST_ON_SELF events)
 
 print("[HHT] Loading ProcFrame.lua")
 
@@ -50,14 +50,14 @@ local ProcState = {
     lnlActive    = false,
     lnlSlot      = 0,    -- 0-based GetPlayerBuff index (same index for GetPlayerBuffTimeLeft)
     lnlBuffId    = 0,    -- buffId from GetPlayerBuff (for GetPlayerBuffTexture)
-    lnlExpireTime = 0,   -- GetTime() value when LnL expires (refreshed every scan to handle slot-drift)
-    lnlNPExpireTime = 0, -- Nampower AURA_CAST_ON_SELF: server-accurate expireTime (overrides API read)
+    lnlExpireTime = 0,   -- GetTime() value when LnL expires (set by BUFF_ADDED_SELF via AURA_CAST_ON_SELF cache)
 
     -- Experimental Ammo detection state
     ammoActive    = false,
     ammoSlot      = 0,
     ammoIsDebuff  = true,   -- Experimental Ammo appears as player debuff, not buff
     ammoType      = nil,    -- "explosive" | "poisonous" | "enchanted"
+    ammoSpellId   = nil,    -- spellId from DEBUFF_ADDED_SELF (for matching DEBUFF_REMOVED_SELF)
     ammoExpireTime = 0,     -- GetTime() value when ammo expires (set at detection)
 
     -- Kill Command state
@@ -88,6 +88,7 @@ local ProcState = {
     UPDATE_INTERVAL = 0.05,
     SCAN_THROTTLE   = 0.1,
     pendingRescan   = false,  -- force scan on next frame after UNIT_BUFF
+    pendingDurationMs = {},   -- AURA_CAST_ON_SELF cache: [spellId] = durationMs, consumed by BUFF/DEBUFF_ADDED_SELF
 }
 
 -- ============ Buff Detection Constants ============
@@ -116,10 +117,8 @@ local AMMO_FALLBACK_EXPLOSIVE = "Interface\\Icons\\Ability_SearingArrow"        
 local AMMO_FALLBACK_POISONOUS = "Interface\\Icons\\Ability_PoisonArrow"         -- verified 2026-03-20 via /hht proc scan
 local AMMO_FALLBACK_ENCHANTED = "Interface\\Icons\\Ability_TheBlackArrow"         -- verified 2026-03-20 via /hht proc scan
 
--- Known proc durations for self-timing (GetPlayerDebuffTimeLeft unavailable)
--- GetPlayerBuffTimeLeft is unreliable for repeated calls (wrong aura index),
--- so we capture it ONCE at detection and count down via GetTime().
-local AMMO_DURATION = 60  -- seconds; verify from in-game tooltip if wrong
+-- Duration is captured from AURA_CAST_ON_SELF (arg8=durationMs) before BUFF/DEBUFF_ADDED_SELF fires.
+-- This matches the DoiteAuras approach and requires no hardcoded fallback durations.
 
 -- ============ Helper Functions ============
 local function GetDB()
@@ -172,22 +171,11 @@ local function ScanProcs(force)
     if lnlEnabled  == nil then lnlEnabled  = true end
     if ammoEnabled == nil then ammoEnabled = true end
 
-    -- Remember previous state to detect activation transitions
-    local prevLnlActive  = ProcState.lnlActive
-    local prevAmmoActive = ProcState.ammoActive
-
-    -- Reset before scan
-    ProcState.lnlActive  = false
-    ProcState.lnlSlot    = 0
-    ProcState.lnlBuffId  = 0
-    ProcState.ammoActive = false
-    ProcState.ammoSlot   = 0
-    ProcState.ammoType   = nil
-
-    -- ---- Scan BUFFS: Lock and Load ----
-    -- Use GetPlayerBuff/GetPlayerBuffTexture (0-based) so GetPlayerBuffTimeLeft(i) uses
-    -- the exact same index - consistent with how the haste bar works.
-    if lnlEnabled then
+    -- ---- Scan BUFFS: Lock and Load (bootstrap/fallback only) ----
+    -- Ammo is fully event-driven (DEBUFF_ADDED/REMOVED_SELF) - not scanned here.
+    -- Only runs when lnlActive=false to recover from a missed BUFF_ADDED_SELF.
+    -- Normal proc detection is entirely event-driven via BUFF_ADDED_SELF.
+    if lnlEnabled and not ProcState.lnlActive then
         for i = 0, MAX_BUFF_SLOTS do
             local buffId = GetPlayerBuff(i, "HELPFUL")
             if buffId >= 0 then
@@ -206,82 +194,20 @@ local function ScanProcs(force)
                 end
                 if hit then
                     ProcState.lnlActive = true
-                    ProcState.lnlSlot   = i       -- 0-based, for GetPlayerBuffTimeLeft(i)
-                    ProcState.lnlBuffId = buffId  -- for GetPlayerBuffTexture(buffId)
+                    ProcState.lnlSlot   = i       -- 0-based, for GetPlayerAuraDuration(i)
+                    ProcState.lnlBuffId = buffId
+                    local ok, remainingMs = pcall(GetPlayerAuraDuration, i)
+                    if ok and remainingMs and remainingMs > 0 then
+                        ProcState.lnlExpireTime = GetTime() + remainingMs / 1000
+                    else
+                        ProcState.lnlExpireTime = 0  -- unknown: show "!"
+                    end
                     break
                 end
             end
         end
     end
 
-    -- ---- Scan DEBUFFS: Experimental Ammo ----
-    -- These appear as player debuffs (self-applied procs), not buffs
-    -- NOTE: same 1-based/0-based split as buffs: UnitDebuff is 1-based, GetPlayerDebuffID is 0-based.
-    if ammoEnabled then
-        for i = 1, MAX_BUFF_SLOTS do
-            local texture = UnitDebuff("player", i)
-            if texture then
-                local spellID = GetPlayerDebuffID and GetPlayerDebuffID(i - 1) or nil
-                local amType = nil
-                -- Primary: spell ID
-                if spellID then
-                    if AMMO_ID_EXPLOSIVE and spellID == AMMO_ID_EXPLOSIVE then
-                        amType = "explosive"
-                    elseif AMMO_ID_POISONOUS and spellID == AMMO_ID_POISONOUS then
-                        amType = "poisonous"
-                    elseif AMMO_ID_ENCHANTED and spellID == AMMO_ID_ENCHANTED then
-                        amType = "enchanted"
-                    end
-                end
-                -- Fallback: texture
-                if not amType then
-                    if MatchTexture(texture, AMMO_TEX_EXPLOSIVE) then
-                        amType = "explosive"
-                    elseif MatchTexture(texture, AMMO_TEX_POISONOUS) then
-                        amType = "poisonous"
-                    elseif MatchTexture(texture, AMMO_TEX_ENCHANTED) then
-                        amType = "enchanted"
-                    end
-                end
-                -- Last resort: tooltip name
-                if not amType then
-                    local name = ReadBuffNameFromTooltip("player", i, true)  -- isDebuff=true
-                    if name then
-                        if string.find(name, AMMO_BUFF_EXPLOSIVE, 1, true) then
-                            amType = "explosive"
-                        elseif string.find(name, AMMO_BUFF_POISONOUS, 1, true) then
-                            amType = "poisonous"
-                        elseif string.find(name, AMMO_BUFF_ENCHANTED, 1, true) then
-                            amType = "enchanted"
-                        end
-                    end
-                end
-                if amType then
-                    ProcState.ammoActive   = true
-                    ProcState.ammoSlot     = i
-                    ProcState.ammoIsDebuff = true
-                    ProcState.ammoType     = amType
-                    break
-                end
-            end
-        end
-    end
-
-    -- ---- Set expire times ----
-    -- LnL: timer is read FRESH every display tick in HHT_UpdateProcDisplay (not cached here).
-    -- Caching caused a 1-in-10 wrong-value bug: when LnL and Ammo proc together, GetPlayerBuffTimeLeft
-    -- could return the previous buff's stale time (~60s) on the first scan and lock it in.
-    if not ProcState.lnlActive then
-        ProcState.lnlExpireTime   = 0  -- reset on deactivation
-        ProcState.lnlNPExpireTime = 0  -- also clear Nampower value (buff is gone)
-    end
-
-    -- Ammo: use fixed known duration (GetPlayerDebuffTimeLeft unavailable)
-    if ProcState.ammoActive and not prevAmmoActive then
-        ProcState.ammoExpireTime = GetTime() + AMMO_DURATION
-    elseif not ProcState.ammoActive then
-        ProcState.ammoExpireTime = 0
-    end
 end
 
 -- ============ Icon Slot Update Helper ============
@@ -397,36 +323,22 @@ function HHT_UpdateProcDisplay()
 
     -- Lock and Load slot
     if lnlEnabled then
-        local liveTex = nil
-        if ProcState.lnlActive and ProcState.lnlBuffId > 0 then
-            liveTex = GetPlayerBuffTexture(ProcState.lnlBuffId)
-            if liveTex and MatchTexture(liveTex, LNL_TEXTURE_PATTERN) then
-                -- Read timer FRESH every display tick (0.05s) - never use a cached value.
-                -- If one read is stale (e.g. returns prev buff's time), the next frame corrects it.
-                local tl = GetPlayerBuffTimeLeft and GetPlayerBuffTimeLeft(ProcState.lnlSlot) or 0
-                if tl > 0 then
-                    ProcState.lnlExpireTime = GetTime() + tl
-                end
-                -- tl == 0: no timer data or permanent buff - keep previous expireTime as-is
-            else
-                -- Slot no longer holds LnL (expired between scans)
-                    ProcState.lnlActive       = false
-                ProcState.lnlSlot         = 0
-                ProcState.lnlBuffId       = 0
-                ProcState.lnlExpireTime   = 0
-                ProcState.lnlNPExpireTime = 0
-                liveTex = nil
+        if ProcState.lnlActive then
+            -- Safety net: BUFF_REMOVED_SELF missed and expire time elapsed
+            if ProcState.lnlExpireTime > 0 and GetTime() > ProcState.lnlExpireTime then
+                ProcState.lnlActive     = false
+                ProcState.lnlSlot       = 0
+                ProcState.lnlBuffId     = 0
+                ProcState.lnlExpireTime = 0
             end
         end
-        -- Nampower: prefer server-accurate expireTime; fall back to API read
-        local lnlDisplayExpireTime = ProcState.lnlNPExpireTime
-        if lnlDisplayExpireTime <= 0 or lnlDisplayExpireTime <= GetTime() then
-            lnlDisplayExpireTime = ProcState.lnlExpireTime
-        end
+        -- liveTex is always nil: GetPlayerBuffTexture(buffId) requires the buffId from
+        -- GetPlayerBuff(), not the aura slot from arg6. Passing the wrong value returns
+        -- a random other buff's icon. LNL_FALLBACK_ICON is always correct here.
         UpdateIconSlot(
             ProcState.lnlBg, ProcState.lnlIcon, ProcState.lnlGlow, ProcState.lnlTimer,
-            ProcState.lnlActive, lnlDisplayExpireTime,
-            liveTex, LNL_FALLBACK_ICON,
+            ProcState.lnlActive, ProcState.lnlExpireTime,
+            nil, LNL_FALLBACK_ICON,
             pulseAlpha, showDimmed
         )
     elseif ProcState.lnlBg then
@@ -435,17 +347,11 @@ function HHT_UpdateProcDisplay()
 
     -- Experimental Ammo slot
     if ammoEnabled then
+        -- liveTex is always nil: ammo is a debuff tracked via DEBUFF_ADDED/REMOVED_SELF events.
+        -- UnitDebuff() uses a 1-based index, but ammoSlot holds the raw Nampower aura slot
+        -- (0-based, 32-47), so we cannot use it to validate via UnitDebuff. The event handlers
+        -- are authoritative; we do not re-validate here.
         local liveTex = nil
-        if ProcState.ammoActive and ProcState.ammoSlot > 0 then
-            -- Ammo is a player debuff, not a buff
-            liveTex = UnitDebuff("player", ProcState.ammoSlot)
-            -- Validate slot still has an aura (debuffs don't shift like buffs, but be safe)
-            if not liveTex then
-                ProcState.ammoActive    = false
-                ProcState.ammoSlot      = 0
-                ProcState.ammoExpireTime = 0
-            end
-        end
         local fallback = AMMO_FALLBACK_EXPLOSIVE
         if ProcState.ammoType == "poisonous" then
             fallback = AMMO_FALLBACK_POISONOUS
@@ -781,13 +687,96 @@ ProcModule:SetScript("OnEvent", function()
         HHT_ProcFrame_Initialize()
 
     elseif event == "AURA_CAST_ON_SELF" then
-        local spellId = tonumber(arg1) or 0
+        -- Nampower: fires before BUFF/DEBUFF_ADDED_SELF; arg1=spellId, arg8=durationMs
+        local spellId    = tonumber(arg1) or 0
         local durationMs = tonumber(arg8) or 0
-        if spellId == LNL_SPELL_ID and durationMs > 0 then
-            ProcState.lnlNPExpireTime = GetTime() + durationMs / 1000
+        if spellId > 0 and durationMs > 0 then
+            ProcState.pendingDurationMs[spellId] = durationMs
         end
 
-    elseif event == "UNIT_BUFF" or event == "UNIT_DEBUFF" then
+    elseif event == "BUFF_ADDED_SELF" then
+        -- Nampower: fires instantly when a player buff is added or stack-modified.
+        -- arg3=spellId, arg6=auraSlot (0-based), arg7=state (0=added, 2=stacks changed)
+        local spellId  = tonumber(arg3) or 0
+        local auraSlot = tonumber(arg6) or 0
+        if spellId == LNL_SPELL_ID then
+            ProcState.lnlActive = true
+            ProcState.lnlSlot   = auraSlot
+            ProcState.lnlBuffId = auraSlot  -- buffId == slot in vanilla
+            local durationMs = ProcState.pendingDurationMs[LNL_SPELL_ID]
+            if durationMs and durationMs > 0 then
+                ProcState.lnlExpireTime = GetTime() + durationMs / 1000
+                ProcState.pendingDurationMs[LNL_SPELL_ID] = nil
+            else
+                ProcState.lnlExpireTime = 0  -- unknown: show "!"
+            end
+            HHT_UpdateProcDisplay()
+        end
+
+    elseif event == "BUFF_REMOVED_SELF" then
+        -- Nampower: fires when a buff loses a stack (arg7=2) or is fully removed (arg7=1).
+        -- arg3=spellId, arg7=state (1=fully removed, 2=stack decrease only)
+        local spellId = tonumber(arg3) or 0
+        local state   = tonumber(arg7) or 1
+        if state == 2 then return end  -- stack decrease only (e.g. first LnL charge used), buff still active
+        if spellId == LNL_SPELL_ID then
+            ProcState.lnlActive     = false
+            ProcState.lnlSlot       = 0
+            ProcState.lnlBuffId     = 0
+            ProcState.lnlExpireTime = 0
+            HHT_UpdateProcDisplay()
+        end
+
+    elseif event == "DEBUFF_ADDED_SELF" then
+        -- Nampower: fires instantly when a player debuff is added.
+        -- arg3=spellId, arg6=auraSlot (0-based, 32-47 for debuffs), arg7=state (0=added, 2=stacks changed)
+        local spellId  = tonumber(arg3) or 0
+        local auraSlot = tonumber(arg6) or 0
+        if spellId <= 0 then return end
+        -- Identify ammo type via spell name (locale-independent)
+        local ok, name = pcall(GetSpellNameAndRankForId, spellId)
+        local amType = nil
+        if ok and name and name ~= "" then
+            if string.find(name, AMMO_BUFF_EXPLOSIVE, 1, true) then
+                amType = "explosive"
+            elseif string.find(name, AMMO_BUFF_POISONOUS, 1, true) then
+                amType = "poisonous"
+            elseif string.find(name, AMMO_BUFF_ENCHANTED, 1, true) then
+                amType = "enchanted"
+            end
+        end
+        if amType then
+            local durationMs = ProcState.pendingDurationMs[spellId]
+            ProcState.ammoActive     = true
+            ProcState.ammoSlot       = auraSlot
+            ProcState.ammoIsDebuff   = true
+            ProcState.ammoType       = amType
+            ProcState.ammoSpellId    = spellId
+            if durationMs and durationMs > 0 then
+                ProcState.ammoExpireTime = GetTime() + durationMs / 1000
+                ProcState.pendingDurationMs[spellId] = nil
+            else
+                ProcState.ammoExpireTime = 0  -- unknown: show "!"
+            end
+            HHT_UpdateProcDisplay()
+        end
+
+    elseif event == "DEBUFF_REMOVED_SELF" then
+        -- Nampower: fires when a player debuff is fully removed.
+        -- arg3=spellId, arg7=state (1=fully removed, 2=stack decrease)
+        local spellId = tonumber(arg3) or 0
+        local state   = tonumber(arg7) or 1
+        if state == 2 then return end
+        if ProcState.ammoActive and ProcState.ammoSpellId == spellId then
+            ProcState.ammoActive     = false
+            ProcState.ammoSlot       = 0
+            ProcState.ammoType       = nil
+            ProcState.ammoSpellId    = nil
+            ProcState.ammoExpireTime = 0
+            HHT_UpdateProcDisplay()
+        end
+
+    elseif event == "UNIT_BUFF" then
         if arg1 == "player" then
             ScanProcs(true)
             HHT_UpdateProcDisplay()
@@ -1115,10 +1104,20 @@ function HHT_ProcFrame_Initialize()
 
     -- Register events
     ProcModule:RegisterEvent("UNIT_BUFF")
-    ProcModule:RegisterEvent("UNIT_DEBUFF")
     ProcModule:RegisterEvent("PLAYER_ENTERING_WORLD")
-    if SetCVar then pcall(SetCVar, "NP_EnableAuraCastEvents", "1") end
+    -- Nampower: event-driven LnL tracking (fires instantly when buffs are added/removed)
     ProcModule:RegisterEvent("AURA_CAST_ON_SELF")
+    ProcModule:RegisterEvent("BUFF_ADDED_SELF")
+    ProcModule:RegisterEvent("BUFF_REMOVED_SELF")
+    ProcModule:RegisterEvent("DEBUFF_ADDED_SELF")
+    ProcModule:RegisterEvent("DEBUFF_REMOVED_SELF")
+
+    -- Nampower availability check (hard dependency for accurate proc timers)
+    if not GetPlayerAuraDuration then
+        DEFAULT_CHAT_FRAME:AddMessage(
+            "|cFFFF4444HHT:|r Nampower nicht gefunden! Proc Frame benötigt Nampower für korrekte Timer.",
+            1, 0.3, 0.3)
+    end
 
     DEFAULT_CHAT_FRAME:AddMessage(
         "|cFFABD473HHT:|r Proc Frame loaded. Use |cFFFFFF00/hht proc scan|r to discover buff textures.",
