@@ -703,13 +703,15 @@ ProcModule:SetScript("OnEvent", function()
             ProcState.lnlActive = true
             ProcState.lnlSlot   = auraSlot
             ProcState.lnlBuffId = auraSlot  -- buffId == slot in vanilla
-            local durationMs = ProcState.pendingDurationMs[LNL_SPELL_ID]
-            if durationMs and durationMs > 0 then
-                ProcState.lnlExpireTime = GetTime() + durationMs / 1000
-                ProcState.pendingDurationMs[LNL_SPELL_ID] = nil
-            else
-                ProcState.lnlExpireTime = 0  -- unknown: show "!"
+            -- Prefer AURA_CAST_ON_SELF cache; fall back to GetPlayerAuraDuration
+            local cached = ProcState.pendingDurationMs[LNL_SPELL_ID]
+            local durationMs = cached
+            if not durationMs or durationMs <= 0 then
+                local ok, v = pcall(GetPlayerAuraDuration, auraSlot)
+                if ok and v and v > 0 then durationMs = v end
             end
+            ProcState.pendingDurationMs[LNL_SPELL_ID] = nil
+            ProcState.lnlExpireTime = (durationMs and durationMs > 0) and (GetTime() + durationMs / 1000) or 0
             HHT_UpdateProcDisplay()
         end
 
@@ -746,18 +748,20 @@ ProcModule:SetScript("OnEvent", function()
             end
         end
         if amType then
-            local durationMs = ProcState.pendingDurationMs[spellId]
+            -- Prefer AURA_CAST_ON_SELF cache; fall back to GetPlayerAuraDuration
+            local cached = ProcState.pendingDurationMs[spellId]
+            local durationMs = cached
+            if not durationMs or durationMs <= 0 then
+                local ok, v = pcall(GetPlayerAuraDuration, auraSlot)
+                if ok and v and v > 0 then durationMs = v end
+            end
+            ProcState.pendingDurationMs[spellId] = nil
             ProcState.ammoActive     = true
             ProcState.ammoSlot       = auraSlot
             ProcState.ammoIsDebuff   = true
             ProcState.ammoType       = amType
             ProcState.ammoSpellId    = spellId
-            if durationMs and durationMs > 0 then
-                ProcState.ammoExpireTime = GetTime() + durationMs / 1000
-                ProcState.pendingDurationMs[spellId] = nil
-            else
-                ProcState.ammoExpireTime = 0  -- unknown: show "!"
-            end
+            ProcState.ammoExpireTime = (durationMs and durationMs > 0) and (GetTime() + durationMs / 1000) or 0
             HHT_UpdateProcDisplay()
         end
 
