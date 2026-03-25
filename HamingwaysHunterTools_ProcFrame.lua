@@ -196,7 +196,8 @@ local function ScanProcs(force)
                     ProcState.lnlActive = true
                     ProcState.lnlSlot   = i       -- 0-based, for GetPlayerAuraDuration(i)
                     ProcState.lnlBuffId = buffId
-                    local ok, remainingMs = pcall(GetPlayerAuraDuration, i)
+                    -- GetPlayerAuraDuration returns (spellId, remainingMs, expiryTimestamp)
+                    local ok, _, remainingMs = pcall(GetPlayerAuraDuration, i)
                     if ok and remainingMs and remainingMs > 0 then
                         ProcState.lnlExpireTime = GetTime() + remainingMs / 1000
                     else
@@ -703,12 +704,12 @@ ProcModule:SetScript("OnEvent", function()
             ProcState.lnlActive = true
             ProcState.lnlSlot   = auraSlot
             ProcState.lnlBuffId = auraSlot  -- buffId == slot in vanilla
-            -- Prefer AURA_CAST_ON_SELF cache; fall back to GetPlayerAuraDuration
+            -- GetPlayerAuraDuration returns (spellId, remainingMs, expiryTimestamp)
             local cached = ProcState.pendingDurationMs[LNL_SPELL_ID]
             local durationMs = cached
             if not durationMs or durationMs <= 0 then
-                local ok, v = pcall(GetPlayerAuraDuration, auraSlot)
-                if ok and v and v > 0 then durationMs = v end
+                local ok, _, remainingMs = pcall(GetPlayerAuraDuration, auraSlot)
+                if ok and remainingMs and remainingMs > 0 then durationMs = remainingMs end
             end
             ProcState.pendingDurationMs[LNL_SPELL_ID] = nil
             ProcState.lnlExpireTime = (durationMs and durationMs > 0) and (GetTime() + durationMs / 1000) or 0
@@ -748,12 +749,12 @@ ProcModule:SetScript("OnEvent", function()
             end
         end
         if amType then
-            -- Prefer AURA_CAST_ON_SELF cache; fall back to GetPlayerAuraDuration
+            -- GetPlayerAuraDuration returns (spellId, remainingMs, expiryTimestamp)
             local cached = ProcState.pendingDurationMs[spellId]
             local durationMs = cached
             if not durationMs or durationMs <= 0 then
-                local ok, v = pcall(GetPlayerAuraDuration, auraSlot)
-                if ok and v and v > 0 then durationMs = v end
+                local ok, _, remainingMs = pcall(GetPlayerAuraDuration, auraSlot)
+                if ok and remainingMs and remainingMs > 0 then durationMs = remainingMs end
             end
             ProcState.pendingDurationMs[spellId] = nil
             ProcState.ammoActive     = true
