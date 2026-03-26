@@ -2,15 +2,15 @@
 
 A comprehensive, feature-rich Hunter addon for World of Warcraft Classic (1.12) that provides everything you need for optimal Hunter gameplay.
 
-![Version](https://img.shields.io/badge/version-1.1.4-blue.svg)
+![Version](https://img.shields.io/badge/version-1.1.5-blue.svg)
 ![WoW](https://img.shields.io/badge/WoW-1.12%20Vanilla-orange.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 
 > ⚠️ **Requires [SuperWoW](https://github.com/balakethelock/SuperWoW)**
 > This addon requires SuperWoW by Balake. Install SuperWoW before using HamingwaysHunterTools.
 
-> 💡 **Recommended: [Nampower](https://github.com/pepopo978/nampower)**
-> Install Nampower for server-accurate proc timers. Without it, buff durations are read from the client API which can be slightly off. With Nampower, Lock and Load and Ammo proc timers sync to actual server cast events.
+> ⚠️ **Requires [Nampower](https://github.com/pepopo978/nampower)**
+> Nampower is required for Lock and Load and Ammo proc timers. Without it, the `BUFF_ADDED_SELF` events and `GetPlayerAuraDuration` API needed for proc detection are not available.
 
 ## 🎯 Features
 
