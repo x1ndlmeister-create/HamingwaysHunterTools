@@ -690,15 +690,23 @@ ProcModule:SetScript("OnEvent", function()
 
     elseif event == "BUFF_ADDED_SELF" then
         -- Nampower: fires after AURA_CAST_ON_SELF. arg3=spellId, arg6=auraSlot (0-based)
-        -- First proc: consume cached durationMs from AURA_CAST_ON_SELF.
         local spellId  = tonumber(arg3) or 0
         local auraSlot = tonumber(arg6) or 0
         if spellId == LNL_SPELL_ID then
             local cached = ProcState.pendingDurationMs[LNL_SPELL_ID]
             ProcState.pendingDurationMs[LNL_SPELL_ID] = nil
-            ProcState.lnlActive = true
-            ProcState.lnlSlot   = auraSlot
-            ProcState.lnlExpireTime = (cached and cached > 0) and (GetTime() + cached / 1000) or 0
+            local expireTime = 0
+            if cached and cached > 0 then
+                expireTime = GetTime() + cached / 1000
+            else
+                -- AURA_CAST_ON_SELF doesn't fire for server procs (LnL).
+                -- Read slot directly - table is stable at BUFF_ADDED_SELF time.
+                local t = GetPlayerBuffTimeLeft(auraSlot)
+                if t and t > 0 then expireTime = GetTime() + t end
+            end
+            ProcState.lnlActive     = true
+            ProcState.lnlSlot       = auraSlot
+            ProcState.lnlExpireTime = expireTime
             HHT_UpdateProcDisplay()
         end
 
@@ -767,9 +775,13 @@ ProcModule:SetScript("OnEvent", function()
         end
 
     elseif event == "UNIT_BUFF" then
-        if arg1 == "player" then
-            ScanProcs(true)  -- bootstrap fallback: fills state if BUFF_ADDED_SELF was missed
-            HHT_UpdateProcDisplay()
+        -- Fires when buff table is stable. Re-read expireTime for re-procs.
+        if arg1 == "player" and ProcState.lnlActive then
+            local t = GetPlayerBuffTimeLeft(ProcState.lnlSlot)
+            if t and t > 0 then
+                ProcState.lnlExpireTime = GetTime() + t
+                HHT_UpdateProcDisplay()
+            end
         end
 
     elseif event == "PLAYER_AURAS_CHANGED" then
