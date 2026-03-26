@@ -695,18 +695,14 @@ ProcModule:SetScript("OnEvent", function()
         if spellId == LNL_SPELL_ID then
             local cached = ProcState.pendingDurationMs[LNL_SPELL_ID]
             ProcState.pendingDurationMs[LNL_SPELL_ID] = nil
-            local expireTime = 0
-            if cached and cached > 0 then
-                expireTime = GetTime() + cached / 1000
-            else
-                -- AURA_CAST_ON_SELF doesn't fire for server procs (LnL).
-                -- Read slot directly - table is stable at BUFF_ADDED_SELF time.
-                local t = GetPlayerBuffTimeLeft(auraSlot)
-                if t and t > 0 then expireTime = GetTime() + t end
+            local durationMs = cached
+            if not durationMs or durationMs <= 0 then
+                local ok, _, rem = pcall(GetPlayerAuraDuration, auraSlot)
+                if ok and rem and rem > 0 then durationMs = rem end
             end
             ProcState.lnlActive     = true
             ProcState.lnlSlot       = auraSlot
-            ProcState.lnlExpireTime = expireTime
+            ProcState.lnlExpireTime = (durationMs and durationMs > 0) and (GetTime() + durationMs / 1000) or 0
             HHT_UpdateProcDisplay()
         end
 
@@ -775,11 +771,11 @@ ProcModule:SetScript("OnEvent", function()
         end
 
     elseif event == "UNIT_BUFF" then
-        -- Fires when buff table is stable. Re-read expireTime for re-procs.
+        -- Table stable: re-read duration to catch re-proc (the ONLY fix needed here).
         if arg1 == "player" and ProcState.lnlActive then
-            local t = GetPlayerBuffTimeLeft(ProcState.lnlSlot)
-            if t and t > 0 then
-                ProcState.lnlExpireTime = GetTime() + t
+            local ok, _, rem = pcall(GetPlayerAuraDuration, ProcState.lnlSlot)
+            if ok and rem and rem > 0 then
+                ProcState.lnlExpireTime = GetTime() + rem / 1000
                 HHT_UpdateProcDisplay()
             end
         end
