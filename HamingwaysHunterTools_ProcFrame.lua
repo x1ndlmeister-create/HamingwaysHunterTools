@@ -381,9 +381,6 @@ function HHT_UpdateProcDisplay()
                 bindKey   = GetSpellKeybind("Arcane Shot")
             end
 
-            -- DEBUG
-            DEFAULT_CHAT_FRAME:AddMessage(string.format("|cFFFFAA00HHT AmmoSpell:|r type=%s icon=%s frame=%s spellIcon=%s",
-                tostring(ProcState.ammoType), tostring(spellIcon), tostring(ProcState.ammoSpellIcon), tostring(ProcState.ammoSpellIconBg)), 1, 0.7, 0)
             if ProcState.ammoSpellIcon and spellIcon then
                 ProcState.ammoSpellIcon:SetTexture(spellIcon)
 
