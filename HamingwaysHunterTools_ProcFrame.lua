@@ -48,9 +48,10 @@ local ProcState = {
 
     -- Lock and Load detection state
     lnlActive    = false,
-    lnlSlot      = 0,    -- 0-based GetPlayerBuff index (same index for GetPlayerBuffTimeLeft)
-    lnlBuffId    = 0,    -- buffId from GetPlayerBuff (for GetPlayerBuffTexture)
-    lnlExpireTime = 0,   -- GetTime() value when LnL expires (set by BUFF_ADDED_SELF via AURA_CAST_ON_SELF cache)
+    lnlSlot      = 0,
+    lnlBuffId    = 0,
+    lnlExpireTime = 0,
+    lnlKnownDurationMs = 0,  -- cached from first proc; reused when re-proc arg8=0
 
     -- Experimental Ammo detection state
     ammoActive    = false,
@@ -689,16 +690,25 @@ ProcModule:SetScript("OnEvent", function()
         end
 
     elseif event == "BUFF_ADDED_SELF" then
-        -- arg3=spellId, arg6=auraSlot, arg8=durationMs (Nampower provides duration directly)
+        -- arg3=spellId, arg6=auraSlot, arg8=durationMs
+        -- For re-procs (arg7=2): arg8 may be 0 for server-side procs (LnL).
+        -- Fallback: reuse lnlKnownDurationMs from first proc (LnL always same duration).
         local spellId    = tonumber(arg3) or 0
         local auraSlot   = tonumber(arg6) or 0
         local durationMs = tonumber(arg8) or 0
         if spellId == LNL_SPELL_ID then
             ProcState.pendingDurationMs[LNL_SPELL_ID] = nil
             if durationMs <= 0 then
-                -- fallback: GetPlayerAuraDuration
+                -- arg8 empty: try API, then fall back to cached known duration
                 local ok, _, rem = pcall(GetPlayerAuraDuration, auraSlot)
-                if ok and rem and rem > 0 then durationMs = rem end
+                if ok and rem and rem > 0 then
+                    durationMs = rem
+                elseif ProcState.lnlKnownDurationMs > 0 then
+                    durationMs = ProcState.lnlKnownDurationMs
+                end
+            end
+            if durationMs > 0 then
+                ProcState.lnlKnownDurationMs = durationMs  -- save for future re-procs
             end
             ProcState.lnlActive     = true
             ProcState.lnlSlot       = auraSlot
@@ -771,14 +781,8 @@ ProcModule:SetScript("OnEvent", function()
         end
 
     elseif event == "UNIT_BUFF" then
-        -- Table stable: re-read duration to catch re-proc (the ONLY fix needed here).
-        if arg1 == "player" and ProcState.lnlActive then
-            local ok, _, rem = pcall(GetPlayerAuraDuration, ProcState.lnlSlot)
-            if ok and rem and rem > 0 then
-                ProcState.lnlExpireTime = GetTime() + rem / 1000
-                HHT_UpdateProcDisplay()
-            end
-        end
+        -- GetPlayerAuraDuration is stale at UNIT_BUFF time for server-proc refreshes.
+        -- BUFF_ADDED_SELF with lnlKnownDurationMs fallback handles re-procs instead.
 
     elseif event == "PLAYER_AURAS_CHANGED" then
         -- bootstrap fallback only
