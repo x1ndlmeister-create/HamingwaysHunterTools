@@ -657,6 +657,20 @@ ProcModule:SetScript("OnUpdate", function()
     -- Wrap in pcall so a single runtime error doesn't permanently break the display loop
     local ok, err = pcall(function()
         ScanProcs()
+
+        -- Live-poll remaining LnL duration every tick from Nampower's aura table.
+        -- Handles re-proc without any event timing issues.
+        if ProcState.lnlActive and ProcState.lnlSlot >= 0 then
+            local aok, _, rem = pcall(GetPlayerAuraDuration, ProcState.lnlSlot)
+            if aok and rem and rem > 0 then
+                ProcState.lnlExpireTime = GetTime() + rem / 1000
+            elseif aok then
+                -- rem == 0 → buff gone (not caught by BUFF_REMOVED_SELF)
+                ProcState.lnlActive     = false
+                ProcState.lnlExpireTime = 0
+            end
+        end
+
         HHT_UpdateProcDisplay()
     end)
     if not ok and err then
