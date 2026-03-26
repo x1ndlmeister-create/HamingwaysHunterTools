@@ -172,11 +172,13 @@ local function ScanProcs(force)
     if lnlEnabled  == nil then lnlEnabled  = true end
     if ammoEnabled == nil then ammoEnabled = true end
 
-    -- ---- Scan BUFFS: Lock and Load (bootstrap/fallback only) ----
+    -- ---- Scan BUFFS: Lock and Load ----
     -- Ammo is fully event-driven (DEBUFF_ADDED/REMOVED_SELF) - not scanned here.
-    -- Only runs when lnlActive=false to recover from a missed BUFF_ADDED_SELF.
-    -- Normal proc detection is entirely event-driven via BUFF_ADDED_SELF.
-    if lnlEnabled and not ProcState.lnlActive then
+    -- force=true (UNIT_BUFF): always scan even when active, to refresh expireTime from the
+    --   stable slot (same pattern as haste bar reading after PLAYER_AURAS_CHANGED).
+    --   This fixes re-proc timer staying at old value instead of resetting to ~10s.
+    -- force=false: only scans when lnlActive=false (bootstrap/fallback for missed BUFF_ADDED_SELF).
+    if lnlEnabled and (not ProcState.lnlActive or force) then
         for i = 0, MAX_BUFF_SLOTS do
             local buffId = GetPlayerBuff(i, "HELPFUL")
             if buffId >= 0 then
