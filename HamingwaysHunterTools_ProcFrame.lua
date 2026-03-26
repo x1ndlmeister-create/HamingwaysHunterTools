@@ -198,9 +198,10 @@ local function ScanProcs(force)
                     ProcState.lnlActive = true
                     ProcState.lnlSlot   = i
                     ProcState.lnlBuffId = buffId
-                    local ok, _, remainingMs = pcall(GetPlayerAuraDuration, i)
-                    if ok and remainingMs and remainingMs > 0 then
-                        ProcState.lnlExpireTime = GetTime() + remainingMs / 1000
+                    -- GetPlayerBuffTimeLeft: same API as haste bar, returns seconds remaining
+                    local timeLeft = GetPlayerBuffTimeLeft(i)
+                    if timeLeft and timeLeft > 0 then
+                        ProcState.lnlExpireTime = GetTime() + timeLeft
                     else
                         ProcState.lnlExpireTime = 0
                     end
@@ -715,14 +716,16 @@ ProcModule:SetScript("OnEvent", function()
             ProcState.lnlActive = true
             ProcState.lnlSlot   = auraSlot
             ProcState.lnlBuffId = auraSlot
+            -- Prefer AURA_CAST_ON_SELF cache (ms); fallback: GetPlayerBuffTimeLeft (seconds)
+            -- Same pattern as haste bar (GetPlayerBuffTimeLeft is stable at event time)
             local cached = ProcState.pendingDurationMs[LNL_SPELL_ID]
-            local durationMs = cached
-            if not durationMs or durationMs <= 0 then
-                local ok, _, remainingMs = pcall(GetPlayerAuraDuration, auraSlot)
-                if ok and remainingMs and remainingMs > 0 then durationMs = remainingMs end
-            end
             ProcState.pendingDurationMs[LNL_SPELL_ID] = nil
-            ProcState.lnlExpireTime = (durationMs and durationMs > 0) and (GetTime() + durationMs / 1000) or 0
+            if cached and cached > 0 then
+                ProcState.lnlExpireTime = GetTime() + cached / 1000
+            else
+                local timeLeft = GetPlayerBuffTimeLeft(auraSlot)
+                ProcState.lnlExpireTime = (timeLeft and timeLeft > 0) and (GetTime() + timeLeft) or 0
+            end
             HHT_UpdateProcDisplay()
         end
 
@@ -1137,7 +1140,7 @@ function HHT_ProcFrame_Initialize()
     ProcModule:RegisterEvent("DEBUFF_REMOVED_SELF")
 
     -- Nampower availability check (hard dependency for accurate proc timers)
-    if not GetPlayerAuraDuration then
+    if not GetPlayerBuffTimeLeft then
         DEFAULT_CHAT_FRAME:AddMessage(
             "|cFFFF4444HHT:|r Nampower nicht gefunden! Proc Frame benötigt Nampower für korrekte Timer.",
             1, 0.3, 0.3)
