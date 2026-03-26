@@ -689,20 +689,20 @@ ProcModule:SetScript("OnEvent", function()
         end
 
     elseif event == "BUFF_ADDED_SELF" then
-        -- Nampower: fires after AURA_CAST_ON_SELF. arg3=spellId, arg6=auraSlot (0-based)
-        local spellId  = tonumber(arg3) or 0
-        local auraSlot = tonumber(arg6) or 0
+        -- arg3=spellId, arg6=auraSlot, arg8=durationMs (Nampower provides duration directly)
+        local spellId    = tonumber(arg3) or 0
+        local auraSlot   = tonumber(arg6) or 0
+        local durationMs = tonumber(arg8) or 0
         if spellId == LNL_SPELL_ID then
-            local cached = ProcState.pendingDurationMs[LNL_SPELL_ID]
             ProcState.pendingDurationMs[LNL_SPELL_ID] = nil
-            local durationMs = cached
-            if not durationMs or durationMs <= 0 then
+            if durationMs <= 0 then
+                -- fallback: GetPlayerAuraDuration
                 local ok, _, rem = pcall(GetPlayerAuraDuration, auraSlot)
                 if ok and rem and rem > 0 then durationMs = rem end
             end
             ProcState.lnlActive     = true
             ProcState.lnlSlot       = auraSlot
-            ProcState.lnlExpireTime = (durationMs and durationMs > 0) and (GetTime() + durationMs / 1000) or 0
+            ProcState.lnlExpireTime = durationMs > 0 and (GetTime() + durationMs / 1000) or 0
             HHT_UpdateProcDisplay()
         end
 
