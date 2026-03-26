@@ -87,8 +87,7 @@ local ProcState = {
     lastScan    = 0,
     UPDATE_INTERVAL = 0.05,
     SCAN_THROTTLE   = 0.1,
-    pendingRescan   = false,  -- force scan on next frame after UNIT_BUFF
-    pendingDurationMs = {},   -- AURA_CAST_ON_SELF cache: [spellId] = durationMs, consumed by BUFF/DEBUFF_ADDED_SELF
+    pendingDurationMs = {},   -- AURA_CAST_ON_SELF cache: [spellId] = durationMs
 }
 
 -- ============ Buff Detection Constants ============
@@ -171,12 +170,10 @@ local function ScanProcs(force)
     if lnlEnabled  == nil then lnlEnabled  = true end
     if ammoEnabled == nil then ammoEnabled = true end
 
-    -- ---- Scan BUFFS: Lock and Load ----
-    -- force=true (UNIT_BUFF): buff table is stable → full scan, sets OR clears lnlActive.
-    --   This matches the haste bar pattern (PLAYER_AURAS_CHANGED → re-read everything).
-    -- force=false: only bootstrap-scan when lnlActive=false (fallback if event missed).
-    if lnlEnabled and (not ProcState.lnlActive or force) then
-        local foundInScan = false
+    -- ---- Scan BUFFS: Lock and Load (bootstrap only) ----
+    -- Primary tracking: AURA_CAST_ON_SELF + BUFF_ADDED/REMOVED_SELF events (DoiteAuras pattern).
+    -- This scan runs only as fallback for /reload or missed events, never to refresh expireTime.
+    if lnlEnabled and not ProcState.lnlActive then
         for i = 0, MAX_BUFF_SLOTS do
             local buffId = GetPlayerBuff(i, "HELPFUL")
             if buffId >= 0 then
@@ -187,35 +184,16 @@ local function ScanProcs(force)
                     hit = true
                 elseif texture and MatchTexture(texture, LNL_TEXTURE_PATTERN) then
                     hit = true
-                else
-                    local name = ReadBuffNameFromTooltip("player", i + 1)  -- tooltip uses 1-based
-                    if name and string.find(name, LNL_BUFF_NAME, 1, true) then
-                        hit = true
-                    end
                 end
                 if hit then
-                    foundInScan = true
                     ProcState.lnlActive = true
                     ProcState.lnlSlot   = i
-                    ProcState.lnlBuffId = buffId
-                    -- GetPlayerBuffTimeLeft: same API as haste bar, returns seconds remaining
-                    local timeLeft = GetPlayerBuffTimeLeft(i)
-                    if timeLeft and timeLeft > 0 then
-                        ProcState.lnlExpireTime = GetTime() + timeLeft
-                    else
-                        ProcState.lnlExpireTime = 0
-                    end
+                    -- expireTime unknown at bootstrap (no event durationMs available)
+                    -- show "!" until next proc/refresh provides authoritative duration
+                    ProcState.lnlExpireTime = 0
                     break
                 end
             end
-        end
-        -- force=true: buff table authoritative → if not found, buff is gone → clear state.
-        -- This is the key fix: same pattern as haste bar clearing on PLAYER_AURAS_CHANGED.
-        if force and not foundInScan then
-            ProcState.lnlActive     = false
-            ProcState.lnlSlot       = 0
-            ProcState.lnlBuffId     = 0
-            ProcState.lnlExpireTime = 0
         end
     end
 
@@ -677,15 +655,6 @@ ProcModule:SetScript("OnUpdate", function()
 
     -- Wrap in pcall so a single runtime error doesn't permanently break the display loop
     local ok, err = pcall(function()
-        -- Deferred scan: buff table is stable one frame AFTER the event fires.
-        -- Same pattern as hasteBuffsNeedRefresh in the haste bar.
-        -- Never call ScanProcs directly in the event handler (unstable slot table).
-        if ProcState.pendingRescan then
-            ProcState.pendingRescan = false
-            ScanProcs(true)  -- stable table → accurate GetPlayerBuffTimeLeft
-            HHT_UpdateProcDisplay()
-            return
-        end
         ScanProcs()
         HHT_UpdateProcDisplay()
     end)
@@ -701,47 +670,47 @@ ProcModule:SetScript("OnEvent", function()
         HHT_ProcFrame_Initialize()
 
     elseif event == "AURA_CAST_ON_SELF" then
-        -- Nampower: fires before BUFF/DEBUFF_ADDED_SELF; arg1=spellId, arg8=durationMs
+        -- Nampower: fires BEFORE BUFF_ADDED_SELF. arg1=spellId, arg8=durationMs
+        -- DoiteAuras Refresh-Fix: if LnL already active → re-proc → update expireTime NOW.
+        -- This is the authoritative refresh mechanism. No slot scanning needed.
         local spellId    = tonumber(arg1) or 0
         local durationMs = tonumber(arg8) or 0
-        if spellId > 0 and durationMs > 0 then
+        if spellId == LNL_SPELL_ID and durationMs > 0 then
+            if ProcState.lnlActive then
+                -- Re-proc while active: refresh timer immediately from server duration
+                ProcState.lnlExpireTime = GetTime() + durationMs / 1000
+                HHT_UpdateProcDisplay()
+            end
+            -- Cache for BUFF_ADDED_SELF (first proc)
+            ProcState.pendingDurationMs[spellId] = durationMs
+        elseif spellId > 0 and durationMs > 0 then
+            -- Other spells (ammo etc.)
             ProcState.pendingDurationMs[spellId] = durationMs
         end
 
     elseif event == "BUFF_ADDED_SELF" then
-        -- Nampower: fires instantly when a player buff is added or stack-modified.
-        -- arg3=spellId, arg6=auraSlot (0-based)
-        -- Fast path: set active immediately. UNIT_BUFF fires shortly after with stable
-        -- buff table, calling ScanProcs(true) which re-reads the authoritative duration.
+        -- Nampower: fires after AURA_CAST_ON_SELF. arg3=spellId, arg6=auraSlot (0-based)
+        -- First proc: consume cached durationMs from AURA_CAST_ON_SELF.
         local spellId  = tonumber(arg3) or 0
         local auraSlot = tonumber(arg6) or 0
         if spellId == LNL_SPELL_ID then
-            ProcState.lnlActive = true
-            ProcState.lnlSlot   = auraSlot
-            ProcState.lnlBuffId = auraSlot
-            -- Prefer AURA_CAST_ON_SELF cache (ms); fallback: GetPlayerBuffTimeLeft (seconds)
-            -- Same pattern as haste bar (GetPlayerBuffTimeLeft is stable at event time)
             local cached = ProcState.pendingDurationMs[LNL_SPELL_ID]
             ProcState.pendingDurationMs[LNL_SPELL_ID] = nil
-            if cached and cached > 0 then
-                ProcState.lnlExpireTime = GetTime() + cached / 1000
-            else
-                local timeLeft = GetPlayerBuffTimeLeft(auraSlot)
-                ProcState.lnlExpireTime = (timeLeft and timeLeft > 0) and (GetTime() + timeLeft) or 0
-            end
+            ProcState.lnlActive = true
+            ProcState.lnlSlot   = auraSlot
+            ProcState.lnlExpireTime = (cached and cached > 0) and (GetTime() + cached / 1000) or 0
             HHT_UpdateProcDisplay()
         end
 
     elseif event == "BUFF_REMOVED_SELF" then
-        -- Nampower: arg3=spellId, arg7=state (1=fully removed, 2=refreshed/stack-change).
-        -- Fast path clear. UNIT_BUFF → ScanProcs(true) is the authoritative fallback.
+        -- Nampower: arg3=spellId, arg7=state (1=fully removed, 2=refresh/re-applied)
+        -- state=2 means buff was refreshed; AURA_CAST_ON_SELF already updated expireTime.
         local spellId = tonumber(arg3) or 0
         local state   = tonumber(arg7) or 1
-        if state == 2 then return end  -- refresh/stack-change: UNIT_BUFF will re-scan
+        if state == 2 then return end
         if spellId == LNL_SPELL_ID then
             ProcState.lnlActive     = false
             ProcState.lnlSlot       = 0
-            ProcState.lnlBuffId     = 0
             ProcState.lnlExpireTime = 0
             HHT_UpdateProcDisplay()
         end
@@ -798,16 +767,14 @@ ProcModule:SetScript("OnEvent", function()
         end
 
     elseif event == "UNIT_BUFF" then
-        -- Don't scan directly here: slot table may still be unstable (same as PLAYER_AURAS_CHANGED).
-        -- Set flag → deferred stable read next OnUpdate tick.
         if arg1 == "player" then
-            ProcState.pendingRescan = true
+            ScanProcs(true)  -- bootstrap fallback: fills state if BUFF_ADDED_SELF was missed
+            HHT_UpdateProcDisplay()
         end
 
     elseif event == "PLAYER_AURAS_CHANGED" then
-        -- Standard vanilla event: fires whenever any player aura changes (proc, expire, refresh).
-        -- Slot table may still be in transition → only set flag, read in next OnUpdate.
-        ProcState.pendingRescan = true
+        -- bootstrap fallback only
+        ScanProcs()
 
     elseif event == "PLAYER_ENTERING_WORLD" then
         if not ProcState.procFrame then
