@@ -92,6 +92,16 @@ local ProcState = {
     lnlPendingRefreshSlot = nil,  -- deferred duration re-read one frame after re-proc
 }
 
+-- ============ LnL Debug Mode ============
+-- Enable with:  /hht lnl debug on
+-- Disable with: /hht lnl debug off
+local lnlDebugEnabled = false
+local function LnlDbg(msg)
+    if lnlDebugEnabled then
+        DEFAULT_CHAT_FRAME:AddMessage("|cFF00FFFFHHTlnl:|r " .. tostring(msg), 0, 1, 1)
+    end
+end
+
 -- ============ Buff Detection Constants ============
 -- Spell IDs (primary detection via GetPlayerBuffID - fastest and most reliable)
 -- Verified in-game via /hht proc scan:
@@ -179,6 +189,8 @@ local function ScanProcs(force)
     --   This fixes re-proc timer staying at old value instead of resetting to ~10s.
     -- force=false: only scans when lnlActive=false (bootstrap/fallback for missed BUFF_ADDED_SELF).
     if lnlEnabled and (not ProcState.lnlActive or force) then
+        LnlDbg("ScanProcs(force=" .. tostring(force) .. ") entering loop, lnlActive=" .. tostring(ProcState.lnlActive))
+        local foundInScan = false
         for i = 0, MAX_BUFF_SLOTS do
             local buffId = GetPlayerBuff(i, "HELPFUL")
             if buffId >= 0 then
@@ -196,11 +208,13 @@ local function ScanProcs(force)
                     end
                 end
                 if hit then
+                    foundInScan = true
                     ProcState.lnlActive = true
                     ProcState.lnlSlot   = i       -- 0-based, for GetPlayerAuraDuration(i)
                     ProcState.lnlBuffId = buffId
                     -- GetPlayerAuraDuration returns (spellId, remainingMs, expiryTimestamp)
                     local ok, _, remainingMs = pcall(GetPlayerAuraDuration, i)
+                    LnlDbg("ScanProcs HIT slot=" .. i .. " ok=" .. tostring(ok) .. " remainingMs=" .. tostring(remainingMs))
                     if ok and remainingMs and remainingMs > 0 then
                         ProcState.lnlExpireTime = GetTime() + remainingMs / 1000
                     else
@@ -210,6 +224,11 @@ local function ScanProcs(force)
                 end
             end
         end
+        if not foundInScan then
+            LnlDbg("ScanProcs: LnL NOT found in buffs (lnlActive stays " .. tostring(ProcState.lnlActive) .. ")")
+        end
+    else
+        LnlDbg("ScanProcs SKIPPED (lnlEnabled=" .. tostring(lnlEnabled) .. " lnlActive=" .. tostring(ProcState.lnlActive) .. " force=" .. tostring(force) .. ")")
     end
 
 end
@@ -330,10 +349,12 @@ function HHT_UpdateProcDisplay()
         if ProcState.lnlActive then
             -- Safety net: BUFF_REMOVED_SELF missed and expire time elapsed
             if ProcState.lnlExpireTime > 0 and GetTime() > ProcState.lnlExpireTime then
+                LnlDbg("SafetyNet fired: lnlExpireTime elapsed, clearing lnlActive")
                 ProcState.lnlActive     = false
                 ProcState.lnlSlot       = 0
                 ProcState.lnlBuffId     = 0
                 ProcState.lnlExpireTime = 0
+                ProcState.lnlPendingRefreshSlot = nil
             end
         end
         -- liveTex is always nil: GetPlayerBuffTexture(buffId) requires the buffId from
@@ -716,6 +737,8 @@ ProcModule:SetScript("OnEvent", function()
         -- arg3=spellId, arg6=auraSlot (0-based), arg7=state (0=added, 2=stacks changed)
         local spellId  = tonumber(arg3) or 0
         local auraSlot = tonumber(arg6) or 0
+        local state7   = tonumber(arg7) or 0
+        LnlDbg("BUFF_ADDED_SELF spellId=" .. spellId .. " slot=" .. auraSlot .. " state=" .. state7)
         if spellId == LNL_SPELL_ID then
             ProcState.lnlActive = true
             ProcState.lnlSlot   = auraSlot
@@ -725,10 +748,14 @@ ProcModule:SetScript("OnEvent", function()
             local durationMs = cached
             if not durationMs or durationMs <= 0 then
                 local ok, _, remainingMs = pcall(GetPlayerAuraDuration, auraSlot)
+                LnlDbg("BUFF_ADDED_SELF GetPlayerAuraDuration ok=" .. tostring(ok) .. " rem=" .. tostring(remainingMs))
                 if ok and remainingMs and remainingMs > 0 then durationMs = remainingMs end
+            else
+                LnlDbg("BUFF_ADDED_SELF using cached durationMs=" .. tostring(cached))
             end
             ProcState.pendingDurationMs[LNL_SPELL_ID] = nil
             ProcState.lnlExpireTime = (durationMs and durationMs > 0) and (GetTime() + durationMs / 1000) or 0
+            LnlDbg("BUFF_ADDED_SELF -> lnlActive=true expireTime=" .. tostring(ProcState.lnlExpireTime))
             -- Schedule deferred re-read in case API returned stale value at this exact frame
             ProcState.lnlPendingRefreshSlot = auraSlot
             HHT_UpdateProcDisplay()
@@ -739,18 +766,22 @@ ProcModule:SetScript("OnEvent", function()
         -- arg3=spellId, arg7=state (1=fully removed, 2=buff refreshed/re-applied)
         local spellId = tonumber(arg3) or 0
         local state   = tonumber(arg7) or 1
+        LnlDbg("BUFF_REMOVED_SELF spellId=" .. spellId .. " state=" .. state .. " lnlActive=" .. tostring(ProcState.lnlActive))
         if state == 2 then
             -- Buff was refreshed (re-proc while active). Schedule duration re-read.
             if spellId == LNL_SPELL_ID and ProcState.lnlActive then
                 ProcState.lnlPendingRefreshSlot = ProcState.lnlSlot
+                LnlDbg("BUFF_REMOVED_SELF state=2 -> scheduled deferred re-read slot=" .. tostring(ProcState.lnlSlot))
             end
             return
         end
         if spellId == LNL_SPELL_ID then
+            LnlDbg("BUFF_REMOVED_SELF state=1 -> clearing lnlActive")
             ProcState.lnlActive     = false
             ProcState.lnlSlot       = 0
             ProcState.lnlBuffId     = 0
             ProcState.lnlExpireTime = 0
+            ProcState.lnlPendingRefreshSlot = nil
             HHT_UpdateProcDisplay()
         end
 
@@ -807,6 +838,7 @@ ProcModule:SetScript("OnEvent", function()
 
     elseif event == "UNIT_BUFF" then
         if arg1 == "player" then
+            LnlDbg("UNIT_BUFF player -> ScanProcs(true), lnlActive=" .. tostring(ProcState.lnlActive))
             ScanProcs(true)
             HHT_UpdateProcDisplay()
             ProcState.pendingRescan = true
@@ -1055,6 +1087,28 @@ function HHT_ProcFrame_Scan()
     DEFAULT_CHAT_FRAME:AddMessage(
         "|cFFFFFF00Tip:|r Update AMMO_ID_* constants at top of ProcFrame.lua with the [D#] IDs above.",
         0.9, 0.9, 0.4)
+end
+
+-- ============ LnL Debug functions (exposed as globals) ============
+function HHT_LnlDebugSet(enabled)
+    lnlDebugEnabled = enabled
+    DEFAULT_CHAT_FRAME:AddMessage(
+        "|cFF00FFFFHHT:|r LnL debug " .. (enabled and "|cFF00FF00ON|r" or "|cFFFF4444OFF|r") ..
+        " - eventos erscheinen in Cyan. Proc LnL um den Ablauf zu sehen.",
+        0, 1, 1)
+end
+
+function HHT_LnlStatus()
+    local now = GetTime()
+    local left = ProcState.lnlExpireTime > 0 and (ProcState.lnlExpireTime - now) or 0
+    DEFAULT_CHAT_FRAME:AddMessage(
+        string.format("|cFF00FFFFHHT LnL State:|r active=%s slot=%s expireTime=%.2f timeLeft=%.2f pendingRefreshSlot=%s",
+            tostring(ProcState.lnlActive),
+            tostring(ProcState.lnlSlot),
+            ProcState.lnlExpireTime,
+            left,
+            tostring(ProcState.lnlPendingRefreshSlot)),
+        0, 1, 1)
 end
 
 -- ============ Initialize ============

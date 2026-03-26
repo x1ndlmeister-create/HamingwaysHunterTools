@@ -4105,6 +4105,24 @@ SlashCmdList["HamingwaysHunterTools"] = function(msgArg)
         else
             print("HHT: Proc Frame not initialized")
         end
+    elseif msgLower == "lnl debug on" then
+        if HHT_LnlDebugSet then
+            HHT_LnlDebugSet(true)
+        else
+            print("HHT: LnL debug function not found")
+        end
+    elseif msgLower == "lnl debug off" then
+        if HHT_LnlDebugSet then
+            HHT_LnlDebugSet(false)
+        else
+            print("HHT: LnL debug function not found")
+        end
+    elseif msgLower == "lnl" then
+        if HHT_LnlStatus then
+            HHT_LnlStatus()
+        else
+            print("HHT: LnL status function not found")
+        end
     elseif msgLower == "petbuffs" then
         if not UnitExists("pet") then
             print("HHT: No pet active")
@@ -4131,6 +4149,8 @@ SlashCmdList["HamingwaysHunterTools"] = function(msgArg)
         print("  /hht resetwarnings - Reset warning position")
         print("  /hht proc scan - Scan active buffs (for proc frame setup)")
         print("  /hht petbuffs - List all pet buff textures")
+        print("  /hht lnl - Show current LnL proc state")
+        print("  /hht lnl debug on/off - Toggle LnL event debug output")
         print("|cFFABD473SuperWoW required|r")
     end
 end
