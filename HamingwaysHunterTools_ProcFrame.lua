@@ -89,6 +89,7 @@ local ProcState = {
     SCAN_THROTTLE   = 0.1,
     pendingRescan   = false,  -- force scan on next frame after UNIT_BUFF
     pendingDurationMs = {},   -- AURA_CAST_ON_SELF cache: [spellId] = durationMs, consumed by BUFF/DEBUFF_ADDED_SELF
+    lnlPendingRefreshSlot = nil,  -- deferred duration re-read one frame after re-proc
 }
 
 -- ============ Buff Detection Constants ============
@@ -380,6 +381,9 @@ function HHT_UpdateProcDisplay()
                 bindKey   = GetSpellKeybind("Arcane Shot")
             end
 
+            -- DEBUG
+            DEFAULT_CHAT_FRAME:AddMessage(string.format("|cFFFFAA00HHT AmmoSpell:|r type=%s icon=%s frame=%s spellIcon=%s",
+                tostring(ProcState.ammoType), tostring(spellIcon), tostring(ProcState.ammoSpellIcon), tostring(ProcState.ammoSpellIconBg)), 1, 0.7, 0)
             if ProcState.ammoSpellIcon and spellIcon then
                 ProcState.ammoSpellIcon:SetTexture(spellIcon)
 
@@ -667,6 +671,19 @@ ProcModule:SetScript("OnUpdate", function()
 
     -- Wrap in pcall so a single runtime error doesn't permanently break the display loop
     local ok, err = pcall(function()
+        -- Deferred LnL duration re-read (handles re-proc while active: GetPlayerAuraDuration
+        -- may return stale data at the exact moment BUFF_ADDED/REMOVED_SELF fires)
+        if ProcState.lnlPendingRefreshSlot then
+            local slot = ProcState.lnlPendingRefreshSlot
+            ProcState.lnlPendingRefreshSlot = nil
+            if ProcState.lnlActive then
+                local ok2, _, remainingMs = pcall(GetPlayerAuraDuration, slot)
+                if ok2 and remainingMs and remainingMs > 0 then
+                    ProcState.lnlExpireTime = GetTime() + remainingMs / 1000
+                    HHT_UpdateProcDisplay()
+                end
+            end
+        end
         if ProcState.pendingRescan then
             ProcState.pendingRescan = false
             ScanProcs(true)
@@ -713,15 +730,23 @@ ProcModule:SetScript("OnEvent", function()
             end
             ProcState.pendingDurationMs[LNL_SPELL_ID] = nil
             ProcState.lnlExpireTime = (durationMs and durationMs > 0) and (GetTime() + durationMs / 1000) or 0
+            -- Schedule deferred re-read in case API returned stale value at this exact frame
+            ProcState.lnlPendingRefreshSlot = auraSlot
             HHT_UpdateProcDisplay()
         end
 
     elseif event == "BUFF_REMOVED_SELF" then
-        -- Nampower: fires when a buff loses a stack (arg7=2) or is fully removed (arg7=1).
-        -- arg3=spellId, arg7=state (1=fully removed, 2=stack decrease only)
+        -- Nampower: fires when a buff is modified (arg7=2) or fully removed (arg7=1).
+        -- arg3=spellId, arg7=state (1=fully removed, 2=buff refreshed/re-applied)
         local spellId = tonumber(arg3) or 0
         local state   = tonumber(arg7) or 1
-        if state == 2 then return end  -- stack decrease only (e.g. first LnL charge used), buff still active
+        if state == 2 then
+            -- Buff was refreshed (re-proc while active). Schedule duration re-read.
+            if spellId == LNL_SPELL_ID and ProcState.lnlActive then
+                ProcState.lnlPendingRefreshSlot = ProcState.lnlSlot
+            end
+            return
+        end
         if spellId == LNL_SPELL_ID then
             ProcState.lnlActive     = false
             ProcState.lnlSlot       = 0
