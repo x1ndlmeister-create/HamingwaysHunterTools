@@ -1,5 +1,12 @@
 # Hamingway's HunterTools - Changelog
 
+## Version 1.1.5 (Mar 26, 2026)
+
+### 🔧 Bug Fixes
+- **LnL Re-proc Timer** - Lock and Load timer now correctly resets when the buff re-procs while already active. Root cause: Nampower's `BUFF_ADDED_SELF`/`AURA_CAST_ON_SELF` events carry stale or missing duration for server-side procs on re-application. Fix: poll `GetPlayerAuraDuration` every OnUpdate tick while the buff is active — always reads the live remaining time directly from the aura table.
+
+---
+
 ## Version 1.1.4 (Mar 22, 2026)
 
 ### ✨ New Features
