@@ -677,9 +677,12 @@ ProcModule:SetScript("OnUpdate", function()
 
     -- Wrap in pcall so a single runtime error doesn't permanently break the display loop
     local ok, err = pcall(function()
+        -- Deferred scan: buff table is stable one frame AFTER the event fires.
+        -- Same pattern as hasteBuffsNeedRefresh in the haste bar.
+        -- Never call ScanProcs directly in the event handler (unstable slot table).
         if ProcState.pendingRescan then
             ProcState.pendingRescan = false
-            ScanProcs(true)
+            ScanProcs(true)  -- stable table → accurate GetPlayerBuffTimeLeft
             HHT_UpdateProcDisplay()
             return
         end
@@ -795,11 +798,16 @@ ProcModule:SetScript("OnEvent", function()
         end
 
     elseif event == "UNIT_BUFF" then
+        -- Don't scan directly here: slot table may still be unstable (same as PLAYER_AURAS_CHANGED).
+        -- Set flag → deferred stable read next OnUpdate tick.
         if arg1 == "player" then
-            ScanProcs(true)
-            HHT_UpdateProcDisplay()
             ProcState.pendingRescan = true
         end
+
+    elseif event == "PLAYER_AURAS_CHANGED" then
+        -- Standard vanilla event: fires whenever any player aura changes (proc, expire, refresh).
+        -- Slot table may still be in transition → only set flag, read in next OnUpdate.
+        ProcState.pendingRescan = true
 
     elseif event == "PLAYER_ENTERING_WORLD" then
         if not ProcState.procFrame then
@@ -1130,9 +1138,10 @@ function HHT_ProcFrame_Initialize()
     pcall(CacheSpellBookInfo)
 
     -- Register events
-    ProcModule:RegisterEvent("UNIT_BUFF")
+    ProcModule:RegisterEvent("PLAYER_AURAS_CHANGED")  -- standard vanilla: fires on any aura change, stable next frame
+    ProcModule:RegisterEvent("UNIT_BUFF")              -- Nampower polyfill, belt+suspenders
     ProcModule:RegisterEvent("PLAYER_ENTERING_WORLD")
-    -- Nampower: event-driven LnL tracking (fires instantly when buffs are added/removed)
+    -- Nampower: event-driven LnL/Ammo tracking
     ProcModule:RegisterEvent("AURA_CAST_ON_SELF")
     ProcModule:RegisterEvent("BUFF_ADDED_SELF")
     ProcModule:RegisterEvent("BUFF_REMOVED_SELF")
